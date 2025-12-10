@@ -1,0 +1,181 @@
+  * **Core Model Capabilities:** The
+    This is a reference document detailing the API capabilities of the requested models, focusing on structured output (JSON), Google Search grounding, and custom tool/function calling.
+
+-----
+
+## Gemini API Feature Support Overview
+
+The following models are accessed through the Gemini API. While most Gemini models fully support all features natively, the open-weight **Gemma** model has specific API limitations that require workarounds.
+
+### **Fully Supported Models (Native API Features)**
+
+These models are the recommended choice for guaranteed JSON output and seamless tool use.
+
+#### Model: `gemini-2.5-flash`
+
+  * **Structured Output (JSON Schema):** **YES**. It fully supports the `responseMimeType: "application/json"` and `responseJsonSchema` parameters, making data extraction reliable.
+  * **Google Search Grounding:** **YES**. It natively supports the `tools: [{ googleSearch: {} }]` configuration.
+  * **Function/Tool Calling (Custom):** **YES**. It can interpret user intent and decide when to call a developer-defined function.
+  * **Note:** This model offers the best balance of speed, performance, and cost efficiency. 20 requests per day
+
+#### Model: `gemini-2.5-flash-lite`
+
+  * **Structured Output (JSON Schema):** **YES**. Supports native JSON schema definition.
+  * **Google Search Grounding:** **YES**. Supports the built-in search tool.
+  * **Function/Tool Calling (Custom):** **YES**.
+  * **Note:** This is the most cost-effective and fastest model, designed for high throughput.  20 requests per day
+
+#### Model: `gemini-robotics-er-1.5-preview`
+
+  * **Structured Output (JSON Schema):** **YES**. It provides structured outputs like coordinates (points or bounding boxes) and labels for objects, which is essential for robotics applications.
+  * **Google Search Grounding:** **YES**. It is explicitly designed to be **agentic**, meaning it can natively call tools like Google Search to gather information (e.g., local recycling rules) to inform its physical planning and decision-making.
+  * **Function/Tool Calling (Custom):** **YES**. It uses function calls to sequence subtasks and execute steps via existing robot functions.
+  * **Note:** This model is specialized for **embodied reasoning**, visual understanding, and complex, long-horizon planning in the physical world.
+   250 requests per day
+
+### **API Limited Model (Requires Workarounds)**
+
+#### Model: `gemma-3-27b-it`
+
+  * **Structured Output (JSON Schema):** **NO** (Native API support). The API rejects the `responseMimeType` and `responseJsonSchema` parameters.
+      * ***Workaround Required:*** Must use **prompt engineering** (add the schema and instruction to output *only* raw JSON to the prompt) and **manual string cleanup** (stripping Markdown fences) in client code.
+  * **Google Search Grounding:** **NO** (API rejects `tools` config). The API rejects the request if the `tools: [{ googleSearch: {} }]` parameter is included.
+  * **Function/Tool Calling (Custom):** **YES** (The underlying model can generate the call). However, its official API integration via the Gemini SDK may be inconsistent or require complex multi-turn logic to fully function.
+  * **Note:** This model is highly capable for general reasoning and content generation but is constrained by its limited API integration, which requires developer workarounds.
+  14k requests per day
+
+-----
+
+## Code Examples for Key Features
+
+### 1\. Structured Output (JSON Schema)
+
+This example uses `gemini-2.5-flash` to guarantee output structure.
+
+```typescript
+import { GoogleGenAI, Type } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+const TaskSchema = {
+  type: Type.OBJECT,
+  properties: {
+    taskName: { type: Type.STRING },
+    priority: { type: Type.STRING, enum: ["HIGH", "MEDIUM", "LOW"] },
+  },
+  required: ["taskName", "priority"]
+};
+
+async function generateStructuredTask(description: string) {
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash", // Fully supported
+    contents: `Create a task object based on this request: ${description}`,
+    config: {
+      responseMimeType: "application/json", // Enables JSON Mode
+      responseJsonSchema: TaskSchema,
+    },
+  });
+
+  // No string cleanup needed, the response is guaranteed valid JSON
+  return JSON.parse(response.text);
+}
+```
+
+### 2\. Google Search Grounding
+
+This example uses `gemini-2.5-flash-lite` to retrieve real-time data with sources.
+
+```typescript
+import { GoogleGenAI } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+async function getGroundedResponse(query: string) {
+  const model = "gemini-2.5-flash-lite"; // Fully supported
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: query,
+    config: {
+      tools: [{ googleSearch: {} }], // Enables Grounding
+    },
+  });
+
+  let text = response.text;
+  const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+
+  // Add source citations
+  if (chunks?.length > 0) {
+    text += "\n\n**Sources:**\n";
+    chunks.forEach((chunk: any) => {
+      if (chunk.web?.uri) {
+        text += `- [${chunk.web.title}](${chunk.web.uri})\n`;
+      }
+    });
+  }
+
+  return text;
+}
+```
+
+### 3\. Custom Function/Tool Calling
+
+This example uses `gemini-robotics-er-1.5-preview` to demonstrate defining and responding to an agentic plan.
+
+```typescript
+import { GoogleGenAI, Type } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+// 1. Define the external function's declaration
+const cleanupFunctionDeclaration = {
+  name: 'plan_and_execute_cleanup',
+  description: 'Executes a multi-step plan to clean a specified area.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      targetArea: { type: Type.STRING, description: 'The specific area to be cleaned.' },
+    },
+    required: ['targetArea'],
+  },
+};
+
+async function complexPlanningAgent(userPrompt: string) {
+  const model = "gemini-robotics-er-1.5-preview"; // Excellent for planning/agentic tasks
+
+  // 2. Call the model with the function definition
+  let response = await ai.models.generateContent({
+    model,
+    contents: userPrompt,
+    config: {
+      tools: [{ functionDeclarations: [cleanupFunctionDeclaration] }],
+    },
+  });
+
+  const parts = response.candidates?.[0]?.content?.parts;
+  const functionCall = parts?.[0]?.functionCall;
+
+  if (functionCall) {
+    // 3. If the model wants to call a function, execute it (mocked here)
+    const area = functionCall.args.targetArea;
+
+    // MOCK: Replace this with your actual robot/system API call
+    const result = { status: "SUCCESS", steps: 5 };
+
+    // 4. Send the function's result back to the model
+    response = await ai.models.generateContent({
+      model,
+      contents: [
+        { role: 'model', parts: parts },
+        { role: 'user', parts: [{ functionResponse: { name: 'plan_and_execute_cleanup', response: result } }] }
+      ],
+      config: {
+        tools: [{ functionDeclarations: [cleanupFunctionDeclaration] }],
+      },
+    });
+    return response.text; // The final, synthesized text response
+  }
+
+  return response.text;
+}
+```

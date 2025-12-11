@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wikimedia Commons API Tester</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background-color: #f4f4f9; }
+        h1 { color: #cc0000; }
+        .controls { margin-bottom: 20px; padding: 15px; border: 1px solid #ccc; background-color: #fff; border-radius: 5px; }
+        .image-container { display: flex; flex-wrap: wrap; gap: 20px; }
+        .image-card { border: 1px solid #ddd; padding: 10px; width: 300px; background-color: #fff; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); border-radius: 5px; }
+        .image-card img { max-width: 100%; height: auto; display: block; margin-bottom: 10px; }
+        .license { font-size: 0.9em; color: #555; margin-top: 5px; }
+        .attribution { font-weight: bold; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+
+    <h1>Wikimedia Commons Image Search</h1>
+
+    <div class="controls">
+        <label for="searchTerm">Search Term (e.g., "data structure"):</label>
+        <input type="text" id="searchTerm" value="cat" placeholder="Enter keywords..." style="padding: 8px; width: 300px;">
+        <button onclick="searchImages()" style="padding: 8px 15px; background-color: #cc0000; color: white; border: none; cursor: pointer;">Search</button>
+        <p class="license">**Note:** Wikimedia requires displaying the license and author (attribution).</p>
+    </div>
+
+    <h2>Results:</h2>
+    <p id="status"></p>
+    <div class="image-container" id="results">
+        </div>
+
+    <script>
+        // The core function to fetch data from the MediaWiki API
+        async function searchImages() {
+            const searchTerm = document.getElementById('searchTerm').value;
+            const resultsDiv = document.getElementById('results');
+            const statusDiv = document.getElementById('status');
+
+            resultsDiv.innerHTML = '';
+            statusDiv.textContent = 'Searching...';
+
+            if (!searchTerm) {
+                statusDiv.textContent = 'Please enter a search term.';
+                return;
+            }
+
+            // --- API URL Construction ---
+            const apiUrl = 'https://commons.wikimedia.org/w/api.php?';
+            const params = {
+                // Must be defined for cross-origin requests
+                origin: '*',
+                action: 'query',
+                // Use generator=search for searching content
+                generator: 'search',
+                gsrsearch: searchTerm,
+                // Only look for files (Namespace 6)
+                gsrnamespace: 6,
+                // Set max results
+                gsrlimit: 10,
+                // Get image information
+                prop: 'imageinfo',
+                // Request URL and external metadata (license, author)
+                iiprop: 'url|extmetadata',
+                // Request a specific thumbnail width (better for display)
+                iiurlwidth: 300,
+                format: 'json'
+            };
+
+            const url = apiUrl + new URLSearchParams(params).toString();
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.query && data.query.pages) {
+                    const pages = data.query.pages;
+                    statusDiv.textContent = `Found ${Object.keys(pages).length} images.`;
+
+                    // Loop through all retrieved pages (files)
+                    for (const pageId in pages) {
+                        const page = pages[pageId];
+                        const info = page.imageinfo ? page.imageinfo[0] : null;
+
+                        if (info) {
+                            resultsDiv.appendChild(createImageCard(page.title, info));
+                        }
+                    }
+                } else {
+                    statusDiv.textContent = 'No images found for that search term.';
+                }
+
+            } catch (error) {
+                statusDiv.textContent = `Error fetching data: ${error.message}`;
+                console.error('Fetch error:', error);
+            }
+        }
+
+        // Helper function to process the data and build the HTML card
+        function createImageCard(title, info) {
+            const card = document.createElement('div');
+            card.className = 'image-card';
+
+            const thumbUrl = info.thumburl;
+            const metadata = info.extmetadata || {};
+
+            // --- Extract License & Attribution ---
+            const licenseName = metadata.LicenseShortName ? metadata.LicenseShortName.value : 'N/A';
+            const artist = metadata.Artist ? metadata.Artist.value.replace(/<[^>]*>?/gm, '') : 'Unknown Author'; // Strip HTML tags
+
+            const titleDisplay = title.replace('File:', '').substring(0, 30) + '...';
+
+            card.innerHTML = `
+                <img src="${thumbUrl}" alt="${titleDisplay}">
+                <strong>Title:</strong> ${titleDisplay}<br>
+                <div class="license">
+                    <strong>License:</strong> ${licenseName} <br>
+                    <span class="attribution">**Attribution:** ${artist}</span>
+                </div>
+            `;
+            return card;
+        }
+
+        // Run an initial search when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            searchImages();
+        });
+    </script>
+
+</body>
+</html>

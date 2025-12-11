@@ -33,36 +33,113 @@ const TextBlock: React.FC<{ block: TextBlockType }> = ({ block }) => {
 };
 
 // ============================================
-// IMAGE BLOCK (with positioning)
+// IMAGE BLOCK (Clean Layout System)
+// Positions: hero (centered), intro (left at start), grid (row of images)
+// Using object-contain to show full images without clipping
+// Supports loading state when imageUrl is null
 // ============================================
 const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
   const [imgError, setImgError] = useState(false);
-  const { imageUrl, keywords, caption, position = 'center' } = block;
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const { imageUrl, keywords, caption, position = 'hero' } = block;
 
   const placeholderUrl = `https://placehold.co/800x450/27272a/71717a?text=${encodeURIComponent(keywords?.slice(0, 15) || 'Image')}`;
+
+  // null = loading in background, undefined/error = use placeholder
+  const isLoading = imageUrl === null;
   const src = imgError ? placeholderUrl : (imageUrl || placeholderUrl);
 
-  // Position-based styling
-  const positionClasses = {
-    center: 'w-full max-w-2xl mx-auto mb-6',
-    left: 'float-left mr-6 mb-4 w-[45%] max-w-sm',
-    right: 'float-right ml-6 mb-4 w-[45%] max-w-sm',
-    inline: 'w-full max-w-lg mx-auto my-6'
-  };
+  // Common image style - object-contain to preserve full image
+  const imgClassName = `w-full h-full object-contain transition-opacity duration-300 ${imgLoaded ? 'opacity-100' : 'opacity-0'}`;
 
-  return (
-    <div className={positionClasses[position] || positionClasses.center}>
-      <div className="bg-zinc-900 rounded-xl overflow-hidden border border-zinc-800 shadow-lg">
-        <img
-          src={src}
-          alt={caption || keywords || 'Illustration'}
-          className="w-full h-auto object-cover"
-          referrerPolicy="no-referrer"
-          onError={() => setImgError(true)}
-        />
+  // Loading skeleton component
+  const LoadingSkeleton = ({ height }: { height: string }) => (
+    <div className={`w-full ${height} bg-zinc-800 rounded-xl animate-pulse flex items-center justify-center`}>
+      <div className="flex flex-col items-center gap-2 text-zinc-600">
+        <svg className="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <span className="text-xs">Loading image...</span>
       </div>
+    </div>
+  );
+
+  // HERO: Centered image, moderate width (not full), standalone section
+  if (position === 'hero') {
+    return (
+      <div className="w-full max-w-2xl mx-auto my-8">
+        {isLoading ? (
+          <LoadingSkeleton height="h-[300px]" />
+        ) : (
+          <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '200px', maxHeight: '350px' }}>
+            {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+            <img
+              src={src}
+              alt={caption || keywords || 'Illustration'}
+              className={imgClassName}
+              style={{ maxHeight: '350px' }}
+              referrerPolicy="no-referrer"
+              onLoad={() => setImgLoaded(true)}
+              onError={() => setImgError(true)}
+            />
+          </div>
+        )}
+        {caption && (
+          <p className="text-center text-xs text-zinc-500 mt-2 italic">{caption}</p>
+        )}
+      </div>
+    );
+  }
+
+  // INTRO: Left-aligned image (for slide start), smaller size
+  if (position === 'intro') {
+    return (
+      <div className="float-left mr-6 mb-4 w-[35%] max-w-xs">
+        {isLoading ? (
+          <LoadingSkeleton height="h-[200px]" />
+        ) : (
+          <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '150px', maxHeight: '250px' }}>
+            {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+            <img
+              src={src}
+              alt={caption || keywords || 'Illustration'}
+              className={imgClassName}
+              style={{ maxHeight: '250px' }}
+              referrerPolicy="no-referrer"
+              onLoad={() => setImgLoaded(true)}
+              onError={() => setImgError(true)}
+            />
+          </div>
+        )}
+        {caption && (
+          <p className="text-center text-xs text-zinc-500 mt-2 italic">{caption}</p>
+        )}
+      </div>
+    );
+  }
+
+  // GRID: Inline images for galleries (multiple images in a row)
+  return (
+    <div className="inline-block w-[32%] mx-[0.5%] mb-4 align-top">
+      {isLoading ? (
+        <LoadingSkeleton height="h-[160px]" />
+      ) : (
+        <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '120px', maxHeight: '200px' }}>
+          {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+          <img
+            src={src}
+            alt={caption || keywords || 'Illustration'}
+            className={imgClassName}
+            style={{ maxHeight: '200px' }}
+            referrerPolicy="no-referrer"
+            onLoad={() => setImgLoaded(true)}
+            onError={() => setImgError(true)}
+          />
+        </div>
+      )}
       {caption && (
-        <p className="text-center text-xs text-zinc-500 mt-2 italic">{caption}</p>
+        <p className="text-center text-xs text-zinc-500 mt-1 italic">{caption}</p>
       )}
     </div>
   );
@@ -297,7 +374,7 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
       </div>
 
       {/* Content Blocks */}
-      <div className="clearfix">
+      <div>
         {validBlocks.map((block, index) => {
           const key = `${slide.id}-${index}`;
 
@@ -316,6 +393,8 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
               return null;
           }
         })}
+        {/* Clear floats from left/right positioned images */}
+        <div className="clear-both" />
       </div>
     </div>
   );

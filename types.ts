@@ -50,8 +50,8 @@ export interface ImageBlock {
   type: 'image';
   keywords: string;
   caption?: string;
-  imageUrl?: string;
-  position?: 'center' | 'left' | 'right' | 'inline';
+  imageUrl?: string | null; // null = loading, undefined = not yet fetched
+  position?: 'hero' | 'intro' | 'grid'; // hero=centered, intro=left at start, grid=row of images
 }
 
 export interface QuizOption {

@@ -4,6 +4,7 @@ import {
   generateCurriculum,
   generateModuleContent,
   generateConsultantReply,
+  generateChatResponse,
   refineCurriculum,
   adjustCurriculum,
   ConsultantResult
@@ -38,6 +39,19 @@ function App() {
   const [activeModuleIndex, setActiveModuleIndex] = useState(0);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [isGeneratingModule, setIsGeneratingModule] = useState(false);
+
+  // UI Panels State
+  const [showHistorySidebar, setShowHistorySidebar] = useState(true);
+  const [showCurriculumSidebar, setShowCurriculumSidebar] = useState(true);
+  const [showChatPane, setShowChatPane] = useState(false);
+  const [curriculumSidebarWidth, setCurriculumSidebarWidth] = useState(280);
+  const [chatPaneWidth, setChatPaneWidth] = useState(350);
+
+  // Inline chat state for LEARNING view
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const clarificationEndRef = useRef<HTMLDivElement>(null);
   const refinementEndRef = useRef<HTMLDivElement>(null);
@@ -111,12 +125,15 @@ function App() {
         parts: [{ text: m.text }]
       }));
       const result = await generateConsultantReply(apiHistory, text, false);
+
+      // Show the AI's response
       setClarificationMessages(prev => [...prev, { role: 'model', text: result.text, timestamp: Date.now() }]);
 
-      // Auto-trigger curriculum generation if AI decides to
+      // If AI confirms we should generate, do it now
       if (result.shouldGenerateCurriculum) {
-        // Small delay so user sees the message
-        setTimeout(() => handleGenerateFromChat(), 500);
+        setIsConsulting(false); // Stop typing indicator
+        // Show generating status in UI
+        await handleGenerateFromChat();
       }
     } catch (e) { console.error(e); }
     finally { setIsConsulting(false); }
@@ -229,17 +246,52 @@ function App() {
       setCourse(newCourse);
       setLoadingText('Generating first module...');
 
-      // Generate Module 1 content
+      // Create a ref to track the current course state for callbacks
+      let currentCourse = newCourse;
+
+      // Callback to update image in course state when ready
+      // IMPORTANT: Capture MODULE_INDEX (0) in closure to prevent affecting other modules
+      const MODULE_INDEX = 0;
+      const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
+        setCourse(prevCourse => {
+          if (!prevCourse) return prevCourse;
+
+          // Update the specific image block ONLY in this module
+          const updatedModules = prevCourse.modules.map((mod, modIdx) => {
+            if (modIdx !== MODULE_INDEX) return mod; // Don't touch other modules
+
+            const updatedSlides = mod.slides.map((slide, sIdx) => {
+              if (sIdx !== slideIdx) return slide;
+
+              const updatedBlocks = slide.blocks.map((block, bIdx) => {
+                if (bIdx !== blockIdx || block.type !== 'image') return block;
+                return { ...block, imageUrl };
+              });
+
+              return { ...slide, blocks: updatedBlocks };
+            });
+
+            return { ...mod, slides: updatedSlides };
+          });
+
+          const updated = { ...prevCourse, modules: updatedModules };
+          currentCourse = updated;
+          return updated;
+        });
+      };
+
+      // Generate Module 1 content with progressive image loading
       const module1 = newCourse.modules[0];
       const module1Content = await generateModuleContent(
         newCourse.title,
         module1.title,
         module1.description,
         module1.slides.map(s => s.title),
-        ""
+        "",
+        handleImageReady // Pass callback for progressive loading
       );
 
-      // Update course with Module 1 content
+      // Update course with Module 1 content (images will be null initially, loaded progressively)
       const updatedCourse: Course = {
         ...newCourse,
         modules: newCourse.modules.map((m, idx) =>
@@ -249,11 +301,15 @@ function App() {
         )
       };
 
+      currentCourse = updatedCourse;
       setCourse(updatedCourse);
       saveToHistory(updatedCourse);
       setActiveModuleIndex(0);
       setActiveSlideIndex(0);
+
+      // Switch to LEARNING view immediately - images will load progressively
       setView('LEARNING');
+      setIsLoading(false);
 
       // Generate remaining modules in background
       generateRemainingModules(updatedCourse, 1);
@@ -261,7 +317,6 @@ function App() {
     } catch (error) {
       console.error(error);
       alert("Failed to generate course content. Please try again.");
-    } finally {
       setIsLoading(false);
     }
   };
@@ -281,14 +336,77 @@ function App() {
       try {
         console.log(`\n🔄 Background: Generating module ${i + 1}/${currentCourse.modules.length}...`);
 
+        // Callback for progressive loading of this specific module
+        const MODULE_INDEX = i;
+        const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
+          setCourse(prevCourse => {
+            if (!prevCourse) return prevCourse;
+
+            const updatedModules = prevCourse.modules.map((mod, modIdx) => {
+              if (modIdx !== MODULE_INDEX) return mod;
+
+              const updatedSlides = mod.slides.map((slide, sIdx) => {
+                if (sIdx !== slideIdx) return slide;
+
+                const updatedBlocks = slide.blocks.map((block, bIdx) => {
+                  if (bIdx !== blockIdx || block.type !== 'image') return block;
+                  return { ...block, imageUrl };
+                });
+
+                return { ...slide, blocks: updatedBlocks };
+              });
+
+              return { ...mod, slides: updatedSlides };
+            });
+
+            return { ...prevCourse, modules: updatedModules };
+          });
+        };
+
         const moduleContent = await generateModuleContent(
           currentCourse.title,
           module.title,
           module.description,
           module.slides.map(s => s.title),
-          previousContext
+          previousContext,
+          handleImageReady // Enable progressive loading for background modules too
         );
 
+        // Merge slides: use structure from moduleContent but preserve imageUrls from state
+        setCourse(prevCourse => {
+          if (!prevCourse) return prevCourse;
+
+          const currentSlides = prevCourse.modules[i]?.slides || [];
+
+          // Merge: keep imageUrls from current state if they exist
+          const mergedSlides = moduleContent.slides.map((newSlide, sIdx) => {
+            const currentSlide = currentSlides[sIdx];
+            if (!currentSlide) return newSlide;
+
+            // Merge blocks, preserving imageUrls that were loaded
+            const mergedBlocks = newSlide.blocks.map((newBlock, bIdx) => {
+              const currentBlock = currentSlide.blocks?.[bIdx];
+              if (newBlock.type === 'image' && currentBlock?.type === 'image') {
+                // Preserve imageUrl if already loaded (not null)
+                return currentBlock.imageUrl ? currentBlock : newBlock;
+              }
+              return newBlock;
+            });
+
+            return { ...newSlide, blocks: mergedBlocks };
+          });
+
+          return {
+            ...prevCourse,
+            modules: prevCourse.modules.map((m, idx) =>
+              idx === i
+                ? { ...m, slides: mergedSlides, isLoaded: true }
+                : m
+            )
+          };
+        });
+
+        // Update local reference for next iteration
         updatedCourse = {
           ...updatedCourse,
           modules: updatedCourse.modules.map((m, idx) =>
@@ -298,7 +416,6 @@ function App() {
           )
         };
 
-        setCourse(updatedCourse);
         saveToHistory(updatedCourse);
 
       } catch (error) {
@@ -403,77 +520,178 @@ function App() {
   // VIEWS
   // ============================================
 
-  // HOME VIEW
+  // HOME VIEW - Redesigned with sidebar
   if (view === 'HOME') {
+    const deleteFromHistory = (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      const newHistory = history.filter(h => h.id !== id);
+      setHistory(newHistory);
+      localStorage.setItem('omni_history', JSON.stringify(newHistory));
+    };
+
     return (
-      <div className="h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 relative overflow-y-auto">
-        <div className="fixed top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
-          <div className="absolute top-[20%] left-[20%] w-[60%] h-[60%] bg-zinc-900/30 rounded-full blur-[120px] opacity-50"></div>
+      <div className="h-screen bg-zinc-950 flex">
+        {/* Sidebar - Past Experiences (toggleable) */}
+        <div
+          className={`border-r border-zinc-800 bg-zinc-900/30 flex flex-col h-full hidden md:flex transition-all duration-300 ease-in-out ${
+            showHistorySidebar ? 'w-72' : 'w-16'
+          }`}
+        >
+          {/* Sidebar Header with Toggle */}
+          <div className="p-4 border-b border-zinc-800">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-gradient-to-br from-amber-400 to-orange-500 rounded-xl text-black flex-shrink-0">
+                <Icons.Brain />
+              </div>
+              {showHistorySidebar && (
+                <div className="overflow-hidden">
+                  <h1 className="font-bold text-white text-lg">OmniLearn</h1>
+                  <p className="text-zinc-500 text-xs">AI Learning Platform</p>
+                </div>
+              )}
+            </div>
+            {/* Toggle Button */}
+            <button
+              onClick={() => setShowHistorySidebar(!showHistorySidebar)}
+              className="mt-4 w-full p-2 rounded-lg bg-zinc-800/50 hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2 text-zinc-400 hover:text-white"
+              title={showHistorySidebar ? "Hide sidebar" : "Show past experiences"}
+            >
+              <Icons.MessageCircle />
+              {showHistorySidebar && <span className="text-sm">History</span>}
+            </button>
+          </div>
+
+          {/* Past Experiences List (only when expanded) */}
+          {showHistorySidebar && (
+            <div className="flex-1 overflow-y-auto p-4">
+              <h3 className="text-zinc-500 uppercase text-xs font-bold tracking-widest mb-3">Past Experiences</h3>
+              {history.length === 0 ? (
+                <p className="text-zinc-600 text-sm">No experiences yet. Start learning something new!</p>
+              ) : (
+                <div className="space-y-2">
+                  {history.map((item) => (
+                    <div
+                      key={item.id}
+                      onClick={() => loadFromHistory(item)}
+                      className="group p-3 rounded-lg bg-zinc-800/30 border border-zinc-800/50 hover:bg-zinc-800 hover:border-zinc-700 transition-all cursor-pointer"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-zinc-300 text-sm font-medium group-hover:text-white transition-colors line-clamp-2">
+                          {item.topic}
+                        </span>
+                        <button
+                          onClick={(e) => deleteFromHistory(item.id, e)}
+                          className="text-zinc-600 hover:text-red-400 transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+                          title="Delete"
+                        >
+                          <Icons.X />
+                        </button>
+                      </div>
+                      <div className="text-zinc-600 text-xs mt-1">
+                        {item.modules?.length || 0} modules
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        <div className="z-10 max-w-2xl w-full text-center space-y-10 animate-fade-in-up py-10">
-          <div className="flex justify-center mb-6">
-            <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl shadow-xl text-white">
-               <Icons.Brain />
-            </div>
-          </div>
-          <h1 className="text-5xl md:text-6xl font-bold text-white tracking-tight">OmniLearn AI</h1>
-          <p className="text-zinc-400 text-lg md:text-xl font-light">
-            Master any topic. Structured deep dives, generated specifically for you.
-          </p>
-
-          <div className="w-full max-w-xl mx-auto space-y-4">
-            <div className="relative group">
-              <input
-                type="text"
-                value={topic}
-                onChange={(e) => setTopic(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleInitialSubmit()}
-                placeholder={isChatMode ? "Let's discuss what you want to learn..." : "What do you want to learn today?"}
-                className="w-full bg-zinc-900 border border-zinc-800 text-white text-lg px-6 py-5 rounded-xl shadow-lg focus:outline-none focus:ring-2 focus:ring-zinc-600 transition-all placeholder-zinc-500"
-              />
-              <button
-                onClick={handleInitialSubmit}
-                disabled={isLoading || !topic.trim()}
-                className="absolute right-3 top-3 bottom-3 bg-amber-400 hover:bg-amber-500 text-zinc-950 rounded-lg px-5 flex items-center gap-2 transition-all disabled:opacity-50 font-medium"
-              >
-                {isLoading ? 'Thinking...' : <Icons.ArrowRight />}
-              </button>
-            </div>
-
-            <div className="flex justify-center items-center gap-4 text-sm">
-              <span className={`transition-colors ${!isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Direct Mode</span>
-              <button
-                onClick={() => setIsChatMode(!isChatMode)}
-                className={`w-12 h-6 rounded-full p-1 transition-colors ${isChatMode ? 'bg-amber-400' : 'bg-zinc-800'}`}
-              >
-                <div className={`w-4 h-4 rounded-full bg-black transition-transform ${isChatMode ? 'translate-x-6' : 'translate-x-0'}`}></div>
-              </button>
-              <span className={`transition-colors ${isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Chat Mode</span>
-            </div>
+        {/* Main Content Area */}
+        <div className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-y-auto">
+          {/* Background glow */}
+          <div className="fixed top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
+            <div className="absolute top-[30%] left-[40%] w-[50%] h-[50%] bg-amber-400/5 rounded-full blur-[120px]"></div>
           </div>
 
-          {isLoading && (
-            <div className="text-zinc-500 text-sm animate-pulse tracking-wide">{loadingText}</div>
-          )}
-
-          {history.length > 0 && (
-            <div className="mt-16 text-left w-full max-w-lg mx-auto">
-              <h3 className="text-zinc-600 uppercase text-xs font-bold tracking-widest mb-4">Library</h3>
-              <div className="space-y-3">
-                {history.map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => loadFromHistory(item)}
-                    className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:bg-zinc-900 hover:border-zinc-700 transition-all group"
-                  >
-                    <span className="text-zinc-300 font-medium group-hover:text-white transition-colors">{item.topic}</span>
-                    <span className="text-zinc-600 group-hover:text-zinc-300 transition-colors"><Icons.ArrowRight /></span>
-                  </button>
-                ))}
+          <div className="z-10 max-w-xl w-full text-center space-y-8 animate-fade-in-up">
+            {/* Mobile Logo */}
+            <div className="md:hidden flex justify-center mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-gradient-to-br from-amber-400 to-orange-500 rounded-xl text-black">
+                  <Icons.Brain />
+                </div>
+                <h1 className="font-bold text-white text-2xl">OmniLearn</h1>
               </div>
             </div>
-          )}
+
+            {/* Main Heading */}
+            <div className="space-y-3">
+              <h2 className="text-4xl md:text-5xl font-bold text-white tracking-tight">
+                What do you want to <span className="text-amber-400">learn</span>?
+              </h2>
+              <p className="text-zinc-400 text-lg">
+                Master any topic with AI-powered structured learning
+              </p>
+            </div>
+
+            {/* Input Section */}
+            <div className="space-y-4">
+              <div className="relative group">
+                <input
+                  type="text"
+                  value={topic}
+                  onChange={(e) => setTopic(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleInitialSubmit()}
+                  placeholder={isChatMode ? "Describe what you want to learn..." : "Enter a topic..."}
+                  className="w-full bg-zinc-900 border border-zinc-800 text-white text-lg px-6 py-5 rounded-2xl shadow-lg focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50 transition-all placeholder-zinc-500"
+                />
+                <button
+                  onClick={handleInitialSubmit}
+                  disabled={isLoading || !topic.trim()}
+                  className="absolute right-3 top-3 bottom-3 bg-amber-400 hover:bg-amber-500 text-zinc-950 rounded-xl px-6 flex items-center gap-2 transition-all disabled:opacity-50 font-semibold"
+                >
+                  {isLoading ? (
+                    <span className="animate-spin h-5 w-5 border-2 border-black border-t-transparent rounded-full"></span>
+                  ) : (
+                    <>Start<Icons.ArrowRight /></>
+                  )}
+                </button>
+              </div>
+
+              {/* Mode Toggle */}
+              <div className="flex justify-center items-center gap-4 text-sm">
+                <span className={`transition-colors ${!isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Quick Generate</span>
+                <button
+                  onClick={() => setIsChatMode(!isChatMode)}
+                  className={`w-14 h-7 rounded-full p-1 transition-colors ${isChatMode ? 'bg-amber-400' : 'bg-zinc-800'}`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-black transition-transform ${isChatMode ? 'translate-x-7' : 'translate-x-0'}`}></div>
+                </button>
+                <span className={`transition-colors ${isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Guided Chat</span>
+              </div>
+
+              <p className="text-zinc-600 text-sm">
+                {isChatMode
+                  ? "I'll ask a few questions to personalize your learning experience"
+                  : "Generate a curriculum instantly based on your topic"}
+              </p>
+            </div>
+
+            {isLoading && (
+              <div className="text-amber-400 text-sm animate-pulse tracking-wide">{loadingText}</div>
+            )}
+
+            {/* Mobile History */}
+            {history.length > 0 && (
+              <div className="md:hidden mt-8 text-left">
+                <h3 className="text-zinc-600 uppercase text-xs font-bold tracking-widest mb-3">Continue Learning</h3>
+                <div className="space-y-2">
+                  {history.slice(0, 3).map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => loadFromHistory(item)}
+                      className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:bg-zinc-900 hover:border-zinc-700 transition-all"
+                    >
+                      <span className="text-zinc-300 font-medium">{item.topic}</span>
+                      <Icons.ArrowRight />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -484,19 +702,29 @@ function App() {
     return (
       <div className="h-screen bg-zinc-950 flex flex-col p-4 md:p-8">
         <div className="max-w-4xl mx-auto w-full flex-1 flex flex-col min-h-0 bg-zinc-900/30 border border-zinc-800 rounded-2xl overflow-hidden">
+          {/* Header */}
           <div className="p-4 border-b border-zinc-800 bg-zinc-900/50 flex justify-between items-center">
-            <h2 className="text-white font-semibold flex items-center gap-2">
-              <Icons.Brain /> Learning Consultant
-            </h2>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setView('HOME')}
+                className="text-zinc-500 hover:text-white transition-colors"
+              >
+                <Icons.ArrowLeft />
+              </button>
+              <h2 className="text-white font-semibold flex items-center gap-2">
+                <Icons.Brain /> Learning Buddy
+              </h2>
+            </div>
             <button
               onClick={handleGenerateFromChat}
-              disabled={isLoading}
-              className="bg-amber-400 text-black px-4 py-1.5 rounded-full text-sm font-semibold hover:bg-amber-500 transition-colors disabled:opacity-50"
+              disabled={isLoading || clarificationMessages.length < 2}
+              className="bg-amber-400 text-black px-4 py-2 rounded-full text-sm font-semibold hover:bg-amber-500 transition-colors disabled:opacity-50"
             >
               {isLoading ? 'Generating...' : 'Create Curriculum'}
             </button>
           </div>
 
+          {/* Chat Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {clarificationMessages.map((msg, idx) => (
               <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -509,22 +737,40 @@ function App() {
                 </div>
               </div>
             ))}
-            {isConsulting && (
+
+            {/* Consulting (thinking) indicator */}
+            {isConsulting && !isLoading && (
               <div className="flex justify-start">
                 <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-2xl text-zinc-500 text-sm animate-pulse">
                   Thinking...
                 </div>
               </div>
             )}
+
+            {/* Curriculum Generation Loading */}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="bg-gradient-to-r from-amber-400/10 to-orange-400/10 border border-amber-400/30 p-5 rounded-2xl flex items-center gap-4">
+                  <div className="animate-spin h-6 w-6 border-3 border-amber-400 border-t-transparent rounded-full"></div>
+                  <div>
+                    <div className="text-amber-400 font-medium">Creating your curriculum...</div>
+                    <div className="text-zinc-500 text-sm mt-1">Designing a personalized learning path</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div ref={clarificationEndRef} />
           </div>
 
+          {/* Input - disabled when loading */}
           <div className="p-4 bg-zinc-900/50 border-t border-zinc-800">
             <input
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-zinc-700"
-              placeholder="Type your answer..."
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-zinc-700 disabled:opacity-50"
+              placeholder={isLoading ? "Generating curriculum..." : "Type your answer..."}
+              disabled={isLoading}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                if (e.key === 'Enter' && !isLoading) {
                   handleClarificationSend(e.currentTarget.value);
                   e.currentTarget.value = '';
                 }
@@ -572,55 +818,68 @@ function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-4xl mx-auto p-4 md:p-6 pb-20 space-y-8">
-            {/* Overview */}
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
-              <h2 className="text-lg font-semibold text-white mb-3">What You'll Learn</h2>
-              <p className="text-zinc-400 leading-relaxed">{curriculum.overview}</p>
+          <div className="max-w-5xl mx-auto p-4 md:p-6 pb-20 space-y-8">
+            {/* Overview Section */}
+            <div className="text-center max-w-3xl mx-auto space-y-4">
+              <p className="text-zinc-400 text-lg leading-relaxed">{curriculum.overview}</p>
             </div>
 
-            {/* Learning Goals */}
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">Learning Goals</h2>
-              <ul className="space-y-3">
-                {curriculum.learningGoals.map((goal, idx) => (
-                  <li key={idx} className="flex items-start gap-3">
-                    <div className="w-6 h-6 rounded-full bg-amber-400/20 text-amber-400 flex items-center justify-center flex-shrink-0 text-sm font-bold">
-                      {idx + 1}
-                    </div>
-                    <span className="text-zinc-300">{goal}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Modules */}
-            <div className="space-y-4">
-              <h2 className="text-lg font-semibold text-white">Curriculum Modules</h2>
-              {curriculum.modules.map((module, modIdx) => (
-                <div key={module.id} className="bg-zinc-900/30 border border-zinc-800 rounded-xl overflow-hidden">
-                  <div className="p-4 border-b border-zinc-800/50">
-                    <div className="flex items-center gap-3">
-                      <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Module {modIdx + 1}</span>
-                    </div>
-                    <h3 className="text-white font-medium mt-1">{module.title}</h3>
-                    <p className="text-zinc-500 text-sm mt-1">{module.description}</p>
+            {/* Learning Goals as horizontal badges */}
+            <div className="flex flex-wrap justify-center gap-3">
+              {curriculum.learningGoals.map((goal, idx) => (
+                <div key={idx} className="flex items-center gap-2 bg-zinc-900/50 border border-zinc-800 rounded-full px-4 py-2">
+                  <div className="w-5 h-5 rounded-full bg-amber-400/20 text-amber-400 flex items-center justify-center flex-shrink-0 text-xs font-bold">
+                    {idx + 1}
                   </div>
-                  <div className="p-4 space-y-2">
-                    {module.slides.map((slide, slideIdx) => (
-                      <div key={slide.id} className="flex items-start gap-3 p-2 rounded-lg hover:bg-zinc-800/30 transition-colors">
-                        <div className="w-5 h-5 rounded-full bg-zinc-800 text-zinc-500 flex items-center justify-center text-xs flex-shrink-0 mt-0.5">
-                          {slideIdx + 1}
-                        </div>
-                        <div>
-                          <div className="text-zinc-300 text-sm font-medium">{slide.title}</div>
-                          <div className="text-zinc-600 text-xs mt-0.5">{slide.description}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <span className="text-zinc-300 text-sm">{goal}</span>
                 </div>
               ))}
+            </div>
+
+            {/* Modules Grid - 3 columns */}
+            <div className="space-y-6">
+              <h2 className="text-xl font-semibold text-white text-center">Your Learning Journey</h2>
+              <div className="grid md:grid-cols-3 gap-5">
+                {curriculum.modules.map((module, modIdx) => (
+                  <div key={module.id} className="bg-zinc-900/30 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-colors flex flex-col">
+                    {/* Module Header */}
+                    <div className="flex items-start gap-3 mb-4">
+                      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-black flex items-center justify-center font-bold text-lg flex-shrink-0">
+                        {modIdx + 1}
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="text-white font-semibold leading-tight text-base">{module.title}</h3>
+                      </div>
+                    </div>
+
+                    {/* Description - Full text */}
+                    <p className="text-zinc-400 text-sm leading-relaxed mb-4">{module.description}</p>
+
+                    {/* Slide Topics */}
+                    <div className="border-t border-zinc-800/50 pt-3 mt-auto">
+                      <div className="text-zinc-600 text-xs uppercase tracking-wider mb-2">Topics</div>
+                      <ul className="space-y-1.5">
+                        {module.slides.map((slide) => (
+                          <li key={slide.id} className="text-zinc-400 text-sm flex items-start gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400/50 flex-shrink-0 mt-1.5"></span>
+                            <span>{slide.title}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* By the end summary */}
+            <div className="bg-gradient-to-r from-amber-400/10 to-orange-400/10 border border-amber-400/20 rounded-2xl p-6 text-center">
+              <h3 className="text-white font-semibold mb-2">By the end of this experience</h3>
+              <p className="text-zinc-400">
+                You'll have a comprehensive understanding of <span className="text-amber-400 font-medium">{curriculum.title.replace(/^(Deep Dive into |Introduction to |The |A )/i, '')}</span>,
+                covering {curriculum.modules.length} modules and {curriculum.modules.reduce((acc, m) => acc + m.slides.length, 0)} topics
+                designed to build your knowledge from the ground up.
+              </p>
             </div>
 
             {/* Refinement Section - Mode specific */}
@@ -714,7 +973,7 @@ function App() {
     );
   }
 
-  // LEARNING VIEW
+  // LEARNING VIEW with toggleable/resizable sidebars
   if (view === 'LEARNING' && course) {
     const currentModule = course.modules[activeModuleIndex];
     const currentSlide = currentModule.slides[activeSlideIndex];
@@ -722,85 +981,186 @@ function App() {
     const isLast = activeModuleIndex === course.modules.length - 1 &&
                    activeSlideIndex === currentModule.slides.length - 1;
 
+    // Drag handlers for resizing
+    const handleCurriculumDrag = (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = curriculumSidebarWidth;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const delta = moveEvent.clientX - startX;
+        const newWidth = Math.max(200, Math.min(400, startWidth + delta));
+        setCurriculumSidebarWidth(newWidth);
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      };
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    };
+
+    const handleChatDrag = (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = chatPaneWidth;
+
+      const onMouseMove = (moveEvent: MouseEvent) => {
+        const delta = startX - moveEvent.clientX;
+        const newWidth = Math.max(280, Math.min(500, startWidth + delta));
+        setChatPaneWidth(newWidth);
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+      };
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    };
+
+    // Chat context - minimal for token efficiency
+    const chatContext = {
+      topic: course.topic,
+      modules: course.modules.map(m => m.title),
+      currentSlide: currentSlide?.title || ''
+    };
+
     return (
       <div className="flex h-screen bg-zinc-950 overflow-hidden text-white">
-        {/* Sidebar */}
-        <div className="w-80 bg-black border-r border-zinc-900 flex-col hidden md:flex">
-          <div className="p-6 border-b border-zinc-900">
-            <h2 className="font-semibold text-lg text-zinc-200 truncate">{course.title}</h2>
-            <p className="text-xs text-zinc-500 mt-2 font-medium tracking-wide">MODULES</p>
-          </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            {course.modules.map((mod, modIdx) => (
-              <div key={mod.id}>
-                <div className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2 px-3 flex items-center gap-2">
-                  Module {modIdx + 1}
-                  {!mod.isLoaded && <span className="text-amber-400 text-[10px] normal-case">(loading...)</span>}
-                </div>
-                <div className="text-sm text-zinc-400 px-3 mb-2">{mod.title}</div>
-                <div className="space-y-1">
-                  {mod.slides.map((slide, slideIdx) => (
-                    <button
-                      key={slide.id}
-                      onClick={() => jumpToSlide(modIdx, slideIdx)}
-                      disabled={!mod.isLoaded}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all flex items-center gap-3 disabled:opacity-50 ${
-                        modIdx === activeModuleIndex && slideIdx === activeSlideIndex
-                        ? 'bg-zinc-900 text-white font-medium'
-                        : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'
-                      }`}
-                    >
-                      <div className={`w-1.5 h-1.5 rounded-full ${
-                        modIdx === activeModuleIndex && slideIdx === activeSlideIndex
-                        ? 'bg-amber-400'
-                        : 'bg-zinc-700'
-                      }`}></div>
-                      <span className="truncate">{slide.title}</span>
-                    </button>
-                  ))}
-                </div>
+        {/* Left Sidebar - Curriculum (toggleable + resizable) */}
+        <div
+          className={`bg-black border-r border-zinc-900 flex-col hidden md:flex transition-all duration-300 relative ${
+            showCurriculumSidebar ? '' : 'w-12'
+          }`}
+          style={{ width: showCurriculumSidebar ? curriculumSidebarWidth : 48 }}
+        >
+          {showCurriculumSidebar ? (
+            <>
+              <div className="p-4 border-b border-zinc-900 flex items-center justify-between">
+                <h2 className="font-semibold text-base text-zinc-200 truncate flex-1">{course.title}</h2>
+                <button
+                  onClick={() => setShowCurriculumSidebar(false)}
+                  className="text-zinc-500 hover:text-white p-1"
+                  title="Hide sidebar"
+                >
+                  <Icons.ArrowLeft />
+                </button>
               </div>
-            ))}
-          </div>
-          <div className="p-4 border-t border-zinc-900">
-            <button onClick={() => setView('HOME')} className="text-sm text-zinc-500 hover:text-white flex items-center gap-2 transition-colors">
-              <Icons.ArrowLeft /> Exit Course
-            </button>
-          </div>
+              <div className="flex-1 overflow-y-auto p-3 space-y-4">
+                {course.modules.map((mod, modIdx) => (
+                  <div key={mod.id}>
+                    <div className="text-xs font-bold text-zinc-500 uppercase tracking-widest mb-2 px-2 flex items-center gap-2">
+                      Module {modIdx + 1}
+                      {!mod.isLoaded && <span className="text-amber-400 text-[10px] normal-case">(loading...)</span>}
+                    </div>
+                    <div className="text-sm text-zinc-400 px-2 mb-2 truncate">{mod.title}</div>
+                    <div className="space-y-1">
+                      {mod.slides.map((slide, slideIdx) => (
+                        <button
+                          key={slide.id}
+                          onClick={() => jumpToSlide(modIdx, slideIdx)}
+                          disabled={!mod.isLoaded}
+                          className={`w-full text-left px-2 py-1.5 rounded-lg text-sm transition-all flex items-center gap-2 disabled:opacity-50 ${
+                            modIdx === activeModuleIndex && slideIdx === activeSlideIndex
+                            ? 'bg-zinc-900 text-white font-medium'
+                            : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/30'
+                          }`}
+                        >
+                          <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            modIdx === activeModuleIndex && slideIdx === activeSlideIndex
+                            ? 'bg-amber-400'
+                            : 'bg-zinc-700'
+                          }`}></div>
+                          <span className="truncate">{slide.title}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="p-3 border-t border-zinc-900">
+                <button onClick={() => setView('HOME')} className="text-sm text-zinc-500 hover:text-white flex items-center gap-2 transition-colors">
+                  <Icons.ArrowLeft /> Exit
+                </button>
+              </div>
+              {/* Resize handle */}
+              <div
+                className="absolute right-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-amber-400/50 transition-colors"
+                onMouseDown={handleCurriculumDrag}
+              />
+            </>
+          ) : (
+            <div className="flex flex-col items-center h-full py-4">
+              <button
+                onClick={() => setShowCurriculumSidebar(true)}
+                className="text-zinc-500 hover:text-white p-2"
+                title="Show curriculum"
+              >
+                <Icons.BookOpen />
+              </button>
+              <div className="flex-1"></div>
+              <button onClick={() => setView('HOME')} className="text-zinc-500 hover:text-white p-2 mb-2" title="Exit">
+                <Icons.ArrowLeft />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col h-full relative bg-zinc-950">
+          {/* Desktop Header with Ask AI button */}
+          <div className="hidden md:flex h-14 border-b border-zinc-800 items-center justify-between px-6 bg-zinc-950">
+            <div className="flex items-center gap-3 text-zinc-400 text-sm">
+              <span className="text-zinc-600">Module {activeModuleIndex + 1}</span>
+              <span className="text-zinc-700">•</span>
+              <span className="text-white font-medium truncate max-w-md">{currentSlide?.title}</span>
+            </div>
+            <button
+              onClick={() => setShowChatPane(!showChatPane)}
+              className={`p-2 rounded-lg transition-colors ${showChatPane ? 'bg-amber-400 text-black' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}
+              title="Ask AI"
+            >
+              <Icons.MessageCircle />
+            </button>
+          </div>
+
           {/* Mobile Header */}
-          <div className="md:hidden h-16 border-b border-zinc-800 flex items-center justify-between px-4 bg-zinc-950">
+          <div className="md:hidden h-14 border-b border-zinc-800 flex items-center justify-between px-4 bg-zinc-950">
             <button onClick={() => setView('HOME')} className="text-zinc-400"><Icons.ArrowLeft /></button>
             <div className="flex flex-col overflow-hidden text-center">
               <span className="font-bold truncate text-sm text-white">{currentSlide?.title}</span>
-              <span className="truncate text-xs text-zinc-500">{currentModule.title}</span>
             </div>
-            <div className="w-6"></div>
+            <button onClick={() => setShowChatPane(!showChatPane)} className="text-zinc-400">
+              <Icons.MessageCircle />
+            </button>
           </div>
 
-          <div className="flex-1 overflow-hidden relative p-4 md:p-12 max-w-4xl mx-auto w-full">
-            {isGeneratingModule ? (
-              <div className="flex flex-col items-center justify-center h-full space-y-6 animate-pulse">
-                <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center text-white">
-                  <Icons.Sparkles />
+          {/* Slide Content */}
+          <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-28">
+            <div className="max-w-4xl mx-auto w-full">
+              {isGeneratingModule ? (
+                <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6 animate-pulse">
+                  <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center text-white">
+                    <Icons.Sparkles />
+                  </div>
+                  <h2 className="text-xl font-medium text-zinc-300">Loading module...</h2>
                 </div>
-                <h2 className="text-xl font-medium text-zinc-300">Loading module...</h2>
-                <p className="text-zinc-600 text-center text-sm">Generating content for "{currentModule.title}"</p>
-              </div>
-            ) : currentSlide && currentSlide.blocks.length > 0 ? (
-              <SlideView slide={currentSlide} />
-            ) : (
-              <div className="flex items-center justify-center h-full">
-                <p className="text-zinc-500">No content available for this slide.</p>
-              </div>
-            )}
+              ) : currentSlide && currentSlide.blocks.length > 0 ? (
+                <SlideView slide={currentSlide} />
+              ) : (
+                <div className="flex items-center justify-center min-h-[60vh]">
+                  <p className="text-zinc-500">No content available for this slide.</p>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Bottom Nav */}
-          <div className="h-24 bg-zinc-950/80 backdrop-blur border-t border-zinc-900 flex items-center justify-between px-6 md:px-12 absolute bottom-0 w-full z-20">
+          <div className="h-20 bg-zinc-950/90 backdrop-blur border-t border-zinc-900 flex items-center justify-between px-6 absolute bottom-0 w-full z-20">
             <button
               disabled={isFirst}
               onClick={() => navigateSlide('prev')}
@@ -812,14 +1172,111 @@ function App() {
             <button
               disabled={isLast}
               onClick={() => navigateSlide('next')}
-              className="flex items-center gap-2 bg-amber-400 hover:bg-amber-500 text-black px-8 py-3 rounded-full font-semibold transition-all disabled:opacity-30"
+              className="flex items-center gap-2 bg-amber-400 hover:bg-amber-500 text-black px-6 py-2.5 rounded-full font-semibold transition-all disabled:opacity-30"
             >
               Next <Icons.ArrowRight />
             </button>
           </div>
-
-          <ChatWidget contextTopic={`${course.topic} - ${currentModule.title}: ${currentSlide?.title}`} />
         </div>
+
+        {/* Right Chat Pane (toggleable + resizable) */}
+        {showChatPane && (
+          <div
+            className="bg-black border-l border-zinc-900 flex flex-col h-full relative transition-all duration-300"
+            style={{ width: chatPaneWidth }}
+          >
+            {/* Resize handle */}
+            <div
+              className="absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-amber-400/50 transition-colors"
+              onMouseDown={handleChatDrag}
+            />
+
+            {/* Chat Header */}
+            <div className="p-4 border-b border-zinc-900 flex items-center justify-between">
+              <h3 className="font-semibold text-zinc-200 flex items-center gap-2">
+                <Icons.MessageCircle /> AI Tutor
+              </h3>
+              <button
+                onClick={() => setShowChatPane(false)}
+                className="text-zinc-500 hover:text-white"
+              >
+                <Icons.X />
+              </button>
+            </div>
+
+            {/* Chat Messages */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {chatMessages.length === 0 && (
+                <div className="text-center text-zinc-600 text-sm py-8">
+                  <p className="mb-2">Hi! I'm here to help.</p>
+                  <p>Ask me anything about <span className="text-zinc-400">{currentSlide?.title}</span></p>
+                </div>
+              )}
+              {chatMessages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-2xl p-3 text-sm leading-relaxed ${
+                    msg.role === 'user'
+                      ? 'bg-amber-400 text-black'
+                      : 'bg-zinc-900 text-zinc-300 border border-zinc-800'
+                  }`}>
+                    {msg.text}
+                  </div>
+                </div>
+              ))}
+              {isChatLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-zinc-900 border border-zinc-800 p-3 rounded-2xl text-zinc-500 text-sm animate-pulse">
+                    Thinking...
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Chat Input */}
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!chatInput.trim() || isChatLoading) return;
+
+                const userMsg: ChatMessage = { role: 'user', text: chatInput, timestamp: Date.now() };
+                setChatMessages(prev => [...prev, userMsg]);
+                setChatInput('');
+                setIsChatLoading(true);
+
+                try {
+                  const history = chatMessages.map(m => ({ role: m.role, parts: [{ text: m.text }] }));
+                  const contextPrompt = `Context: Topic is "${course.topic}", current slide is "${currentSlide?.title}". `;
+                  const response = await generateChatResponse(history, contextPrompt + chatInput);
+                  setChatMessages(prev => [...prev, { role: 'model', text: response, timestamp: Date.now() }]);
+                } catch (err) {
+                  console.error('Chat error:', err);
+                  setChatMessages(prev => [...prev, { role: 'model', text: "Sorry, I had trouble responding. Please try again.", timestamp: Date.now() }]);
+                } finally {
+                  setIsChatLoading(false);
+                }
+              }}
+              className="p-3 bg-zinc-950 border-t border-zinc-900"
+            >
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Ask a question..."
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 transition-colors"
+                />
+                <button
+                  type="submit"
+                  disabled={isChatLoading}
+                  className="bg-amber-400 hover:bg-amber-500 text-black rounded-xl px-3 py-2 disabled:opacity-50 transition-colors"
+                >
+                  <Icons.ArrowRight />
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
       </div>
     );
   }

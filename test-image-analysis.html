@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Image Analysis Test</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    h1 { color: #fbbf24; }
+    .test-images {
+      display: flex;
+      gap: 20px;
+      margin: 20px 0;
+    }
+    .test-images img {
+      width: 250px;
+      height: 180px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 2px solid #333;
+    }
+    .test-images div {
+      text-align: center;
+    }
+    .test-images p {
+      font-size: 12px;
+      color: #888;
+      margin-top: 8px;
+    }
+    button {
+      background: #fbbf24;
+      color: #000;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 16px;
+      cursor: pointer;
+      margin: 10px 5px;
+    }
+    button:hover { background: #f59e0b; }
+    button:disabled { background: #666; cursor: not-allowed; }
+    #result {
+      background: #2a2a2a;
+      padding: 20px;
+      border-radius: 8px;
+      margin-top: 20px;
+      white-space: pre-wrap;
+      font-family: monospace;
+      font-size: 14px;
+      min-height: 100px;
+    }
+    .loading { color: #fbbf24; }
+    .error { color: #ef4444; }
+    .success { color: #22c55e; }
+  </style>
+</head>
+<body>
+  <h1>🧪 AI Image Analysis Test</h1>
+  <p>Testing if Gemma can analyze images from Pixabay URLs</p>
+
+  <h2>Test Images</h2>
+  <div class="test-images">
+    <div>
+      <img id="img1" src="" alt="Image 1">
+      <p id="label1">Image 1</p>
+    </div>
+    <div>
+      <img id="img2" src="" alt="Image 2">
+      <p id="label2">Image 2</p>
+    </div>
+    <div>
+      <img id="img3" src="" alt="Image 3">
+      <p id="label3">Image 3</p>
+    </div>
+  </div>
+
+  <button id="fetchBtn" onclick="fetchImages()">1. Fetch Images from Pixabay</button>
+  <button id="analyzeBtn" onclick="analyzeImages()" disabled>2. Ask AI to Analyze</button>
+
+  <h3>AI Response:</h3>
+  <div id="result">Click "Fetch Images" first, then "Ask AI to Analyze"</div>
+
+  <script type="module">
+    import { GoogleGenAI } from "https://esm.run/@anthropic-ai/sdk";
+
+    // Your API key (same as in main app)
+    const API_KEY = "AIzaSyCr3xVGJc4Qy1pZ7z5-w8n-xB4gBNT7do4"; // Replace with your key
+    const PIXABAY_KEY = "49332490-fdd0e4fa39e9e9ea0c32089e0";
+
+    let imageUrls = [];
+
+    // Make functions globally available
+    window.fetchImages = async function() {
+      const resultEl = document.getElementById('result');
+      resultEl.innerHTML = '<span class="loading">🔄 Fetching images from Pixabay...</span>';
+
+      try {
+        // Fetch 3 different types of images
+        const queries = ['football soccer ball', 'basketball orange ball', 'tennis ball green'];
+        imageUrls = [];
+
+        for (let i = 0; i < 3; i++) {
+          const query = queries[i].split(' ').join('+');
+          const res = await fetch(
+            `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${query}&orientation=horizontal&per_page=3&safesearch=true`
+          );
+          const data = await res.json();
+
+          if (data.hits && data.hits.length > 0) {
+            // Pick a random one from top 3
+            const url = data.hits[Math.floor(Math.random() * Math.min(3, data.hits.length))].webformatURL;
+            imageUrls.push(url);
+            document.getElementById(`img${i+1}`).src = url;
+            document.getElementById(`label${i+1}`).textContent = `Image ${i+1}: "${queries[i]}"`;
+          }
+        }
+
+        resultEl.innerHTML = `<span class="success">✅ Fetched ${imageUrls.length} images. Now click "Ask AI to Analyze"</span>\n\nURLs:\n${imageUrls.map((u, i) => `${i+1}. ${u}`).join('\n')}`;
+        document.getElementById('analyzeBtn').disabled = false;
+
+      } catch (error) {
+        resultEl.innerHTML = `<span class="error">❌ Error: ${error.message}</span>`;
+      }
+    };
+
+    window.analyzeImages = async function() {
+      const resultEl = document.getElementById('result');
+      resultEl.innerHTML = '<span class="loading">🔄 Asking AI to analyze images...</span>';
+
+      try {
+        const { GoogleGenAI } = await import("https://esm.run/@google/genai");
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+        const prompt = `I have 3 images. Please analyze each one and tell me:
+1. What does each image show?
+2. Which image shows a FOOTBALL (soccer ball)?
+
+Here are the image URLs:
+Image 1: ${imageUrls[0]}
+Image 2: ${imageUrls[1]}
+Image 3: ${imageUrls[2]}
+
+Please describe what you see in each image, then tell me which one shows a football.`;
+
+        resultEl.innerHTML += '\n\n📤 Sending prompt to gemma-3-27b-it...\n';
+        resultEl.innerHTML += `\n📝 Prompt:\n${prompt}\n\n`;
+
+        const response = await ai.models.generateContent({
+          model: "gemma-3-27b-it",
+          contents: prompt,
+          config: {},
+        });
+
+        const text = response.text;
+        resultEl.innerHTML += `\n<span class="success">📥 AI Response:</span>\n\n${text}`;
+
+      } catch (error) {
+        resultEl.innerHTML = `<span class="error">❌ Error: ${error.message}</span>\n\n${error.stack}`;
+      }
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+/* OmniLearn AI - Custom Styles */
+
+/* Animated fade-in-up for main content */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out;
+}
+
+/* Scrolling animations for background columns */
+@keyframes scrollUp {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-50%);
+  }
+}
+
+@keyframes scrollDown {
+  0% {
+    transform: translateY(-50%);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.animate-scroll-up {
+  animation: scrollUp 40s linear infinite;
+}
+
+.animate-scroll-down {
+  animation: scrollDown 45s linear infinite;
+}
+
+.animate-scroll-up-slow {
+  animation: scrollUp 55s linear infinite;
+}
+
+.animate-scroll-down-slow {
+  animation: scrollDown 60s linear infinite;
+}
+
+/* Pause animation on hover for interactive feel */
+.animate-scroll-up:hover,
+.animate-scroll-down:hover,
+.animate-scroll-up-slow:hover,
+.animate-scroll-down-slow:hover {
+  animation-play-state: paused;
+}

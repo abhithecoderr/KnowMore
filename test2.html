@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AIC Art Search - Debug Logging</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+        }
+        #artworkImage {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ccc;
+            margin-top: 15px;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Search Art Institute of Chicago (Debug Mode)</h1>
+    <p>Check your **browser console (F12)** for full logging of the API response and constructed URLs.</p>
+
+    <input type="text" id="searchTerm" placeholder="Enter artist or title (e.g., Starry Night)">
+    <button onclick="fetchImage()">Search</button>
+
+    <hr>
+
+    <h2 id="artworkTitle"></h2>
+    <img id="artworkImage" src="" alt="Search for an artwork to see its image here." crossorigin="anonymous">
+    <p id="statusMessage"></p>
+
+    <script>
+        async function fetchImage() {
+            const query = document.getElementById('searchTerm').value;
+            const titleElement = document.getElementById('artworkTitle');
+            const imageElement = document.getElementById('artworkImage');
+            const statusElement = document.getElementById('statusMessage');
+
+            // --- Reset and Initial Logging ---
+            titleElement.innerText = 'Searching...';
+            imageElement.src = '';
+            imageElement.alt = 'Artwork loading...';
+            statusElement.innerText = '';
+
+            if (!query) {
+                titleElement.innerText = '';
+                statusElement.innerText = 'Please enter a search term.';
+                return;
+            }
+
+            console.log("--- Starting AIC Image Search ---");
+            console.log("1. Search Query:", query);
+
+            // API endpoint to fetch artwork data
+            const apiUrl = `https://api.artic.edu/api/v1/artworks/search?q=${query}&fields=id,title,image_id,config`;
+            console.log("2. Full API URL:", apiUrl);
+
+            try {
+                // 3. Fetch the search results
+                const response = await fetch(apiUrl);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // Check if any results were found
+                if (!data.data || data.data.length === 0) {
+                    titleElement.innerText = 'No results found.';
+                    imageElement.alt = 'No image available.';
+                    console.log("3. API Response Data:", data);
+                    return;
+                }
+
+                // Get the data for the first result and config
+                const firstArtwork = data.data[0];
+                const iiifUrl = data.config && data.config.iiif_url;
+
+                console.log("4. First Artwork Data (data[0]):", firstArtwork);
+                console.log("5. IIIF Base URL (config.iiif_url):", iiifUrl);
+
+                if (firstArtwork.image_id && iiifUrl) {
+                     const imageId = firstArtwork.image_id;
+
+                     // Construct the final IIIF URL
+                     const constructedUrl = `${iiifUrl}/${imageId}/full/600,/0/default.jpg`;
+
+                     console.log("6. Final Constructed Image URL:", constructedUrl);
+
+                     // 7. Update the HTML img and text tags
+                     imageElement.src = constructedUrl;
+                     imageElement.alt = `Image of ${firstArtwork.title}`;
+                     titleElement.innerText = firstArtwork.title;
+                     statusElement.innerText = `Image URL has been set. Check the Network tab for the loading status.`;
+
+                } else {
+                    titleElement.innerText = firstArtwork.title || 'Artwork found';
+                    statusElement.innerText = 'Error: Image ID or IIIF configuration is missing from the API response.';
+                }
+
+            } catch (error) {
+                console.error("Fetch Error:", error);
+                titleElement.innerText = 'Search Failed';
+                statusElement.innerText = 'Something went wrong with the API call. Check your console for details.';
+            }
+        }
+    </script>
+
+</body>
+</html>

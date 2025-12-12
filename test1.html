@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Image Service Comparator (Pixabay & Wikimedia)</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+        background-color: #f4f7f6;
+      }
+      h1 {
+        color: #333;
+        text-align: center;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+        padding: 15px;
+        background-color: #fff;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      #searchTerm,
+      #searchButton {
+        padding: 10px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+      }
+      #searchTerm {
+        flex-grow: 1;
+      }
+      #searchButton {
+        background-color: #007bff;
+        color: white;
+        cursor: pointer;
+        border: none;
+      }
+      #searchButton:hover {
+        background-color: #0056b3;
+      }
+      .results-container {
+        display: grid;
+        /* Adjusted grid template to fit only two services */
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 20px;
+      }
+      .service-panel {
+        background-color: #fff;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      }
+      .service-panel h2 {
+        margin-top: 0;
+        color: #28a745;
+        border-bottom: 2px solid #28a745;
+        padding-bottom: 5px;
+      }
+      .image-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+        gap: 5px;
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid #eee;
+        padding: 5px;
+      }
+      .image-grid img {
+        width: 100%;
+        height: 100px;
+        object-fit: cover;
+        border-radius: 4px;
+        transition: transform 0.2s;
+      }
+      .image-grid img:hover {
+        transform: scale(1.05);
+      }
+      .loading {
+        text-align: center;
+        padding: 20px;
+        font-style: italic;
+        color: #666;
+      }
+      .error {
+        color: red;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Multi-Service Image Comparator (Pixabay & Wikimedia)</h1>
+
+    <div class="controls">
+      <input
+        type="text"
+        id="searchTerm"
+        placeholder="Enter search term (e.g., 'galaxy', 'dog', 'monet')"
+      />
+      <button id="searchButton">Search All Services</button>
+    </div>
+
+    <div id="resultsContainer" class="results-container"></div>
+
+    <script>
+      // ===========================================
+      // 🔑 API Keys and Configuration
+      // ===========================================
+      const API_KEYS = {
+        // Only Pixabay key is needed now
+        PIXABAY_KEY: "53631556-267a3b1b6dca0533d6b8fe2fa",
+        // PEXELS and NASA keys removed
+      };
+      const MAX_IMAGES_PER_SERVICE = 9;
+      // ===========================================
+      // ⚙️ DOM Elements and Event Listener
+      // ===========================================
+      const searchButton = document.getElementById("searchButton");
+      const searchTermInput = document.getElementById("searchTerm");
+      const resultsContainer = document.getElementById("resultsContainer");
+
+      searchButton.addEventListener("click", () => {
+        const term = searchTermInput.value.trim();
+        if (term) {
+          runAllSearches(term);
+        } else {
+          alert("Please enter a search term.");
+        }
+      });
+
+      // ===========================================
+      // 🎨 Render Functions
+      // ===========================================
+
+      function createServicePanel(serviceName) {
+        const panel = document.createElement("div");
+        panel.className = "service-panel";
+        panel.id = `panel-${serviceName.toLowerCase().replace(/\s/g, "-")}`;
+
+        panel.innerHTML = `
+            <h2>${serviceName}</h2>
+            <div class="image-grid" id="grid-${serviceName
+              .toLowerCase()
+              .replace(/\s/g, "-")}">
+                <p class="loading">Searching...</p>
+            </div>
+        `;
+        return panel;
+      }
+
+      function renderImages(serviceName, data, urlMapper) {
+        const serviceId = serviceName.toLowerCase().replace(/\s/g, "-");
+        const grid = document.getElementById(`grid-${serviceId}`);
+        if (!grid) return;
+
+        grid.innerHTML = "";
+
+        if (!data || data.length === 0) {
+          grid.innerHTML = '<p class="loading">No images found.</p>';
+          return;
+        }
+
+        const imagesToRender = data.slice(0, MAX_IMAGES_PER_SERVICE);
+        imagesToRender.forEach((item) => {
+          const imageUrl = urlMapper(item);
+          if (imageUrl) {
+            const img = document.createElement("img");
+            img.src = imageUrl;
+            img.alt = `${serviceName} image`;
+            img.title = `Source: ${serviceName}`;
+            grid.appendChild(img);
+          }
+        });
+      }
+
+      function renderError(serviceName, error) {
+        const serviceId = serviceName.toLowerCase().replace(/\s/g, "-");
+        const grid = document.getElementById(`grid-${serviceId}`);
+        if (!grid) return;
+
+        grid.innerHTML = `<p class="error">Error: ${
+          error.message || "API call failed."
+        }</p>`;
+      }
+
+      // ===========================================
+      // 🌐 API Call Functions
+      // ===========================================
+
+      // General-purpose fetch function
+      async function fetchService(serviceName, url, mapFn) {
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            if (response.status === 429) {
+              throw new Error(
+                `Rate Limit Exceeded (Status: ${response.status})`
+              );
+            }
+            throw new Error(`HTTP Error! Status: ${response.status}`);
+          }
+          const data = await response.json();
+          renderImages(serviceName, mapFn(data), mapFn.urlMapper);
+        } catch (error) {
+          console.error(`${serviceName} fetch failed:`, error);
+          renderError(serviceName, error);
+        }
+      }
+
+      // --- Pixabay ---
+      const mapPixabay = (data) => data.hits;
+      mapPixabay.urlMapper = (item) => item.webformatURL;
+      const fetchPixabay = (term) => {
+        const key = API_KEYS.PIXABAY_KEY;
+        if (!key || key === "")
+          return renderError("Pixabay", new Error("API Key missing."));
+        const url = `https://pixabay.com/api/?key=${key}&q=${encodeURIComponent(
+          term
+        )}&image_type=photo&per_page=${MAX_IMAGES_PER_SERVICE}`;
+        return fetchService("Pixabay", url, mapPixabay);
+      };
+
+      // --- Wikimedia Commons (With robust filtering) ---
+
+      const isEducationalImage = (page) => {
+        const imageInfo = page.imageinfo && page.imageinfo[0];
+        if (!imageInfo) return false;
+
+        const mime = imageInfo.extmetadata?.MIMEType?.value;
+        const fileName = page.title || '';
+
+        // 1. MIME Type Filter: Reject non-standard image formats like PDF and DjVu.
+        const rejectedMimeTypes = ['application/pdf', 'application/x-djvu', 'text/html'];
+        if (mime && rejectedMimeTypes.includes(mime.toLowerCase())) {
+            console.log(`Rejected ${fileName}: MIME Type ${mime}`);
+            return false;
+        }
+
+        // 2. Title Keyword Filter: Reject known book/document artifacts.
+        const rejectedKeywords = /(book|cover|page|scan|document|frontispiece|thumbnail|illustration of a text)/i;
+        if (rejectedKeywords.test(fileName)) {
+             console.log(`Rejected ${fileName}: Title contains blocked keyword`);
+             return false;
+        }
+
+        // 3. Simple Image Check (Ensures a proper thumbnail URL is available)
+        if (!imageInfo.thumburl) {
+             console.log(`Rejected ${fileName}: No thumbnail URL available`);
+             return false;
+        }
+
+        return true;
+      };
+
+      const mapWikimedia = (data) => {
+        const pages = data.query?.pages || {};
+
+        return Object.values(pages)
+          .filter((page) => isEducationalImage(page))
+          .map((page) => ({
+            source: page.imageinfo[0].thumburl,
+          }));
+      };
+      mapWikimedia.urlMapper = (item) => item.source;
+
+      const fetchWikimedia = (term) => {
+        const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(
+          term
+        )}&gsrlimit=${MAX_IMAGES_PER_SERVICE}&gsrnamespace=6&prop=imageinfo&iiprop=thumburl|extmetadata|url&iiurlwidth=200&format=json&origin=*`;
+        return fetchService("Wikimedia", url, mapWikimedia);
+      };
+
+      // ===========================================
+      // 🏃 Main Execution Function
+      // ===========================================
+
+      function runAllSearches(term) {
+        resultsContainer.innerHTML = ""; // Clear previous results
+
+        const services = [
+          { name: "Pixabay", func: fetchPixabay },
+          { name: "Wikimedia", func: fetchWikimedia },
+          // PEXELS and NASA services removed
+        ];
+
+        services.forEach((service) => {
+          resultsContainer.appendChild(createServicePanel(service.name));
+          try {
+            service.func(term);
+          } catch (e) {
+            renderError(service.name, e);
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

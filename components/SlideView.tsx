@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Slide, ContentBlock, TextBlock as TextBlockType, ImageBlock as ImageBlockType, QuizBlock as QuizBlockType, FunFactBlock as FunFactBlockType, TableBlock as TableBlockType } from '../types';
+import { Slide, ContentBlock, TextBlock as TextBlockType, ImageBlock as ImageBlockType, QuizBlock as QuizBlockType, FunFactBlock as FunFactBlockType, TableBlock as TableBlockType, NotesSummaryBlock as NotesSummaryBlockType, FillBlankBlock as FillBlankBlockType, ShortAnswerBlock as ShortAnswerBlockType, ReflectionBlock as ReflectionBlockType, MatchFollowingBlock as MatchFollowingBlockType } from '../types';
 import { Icons } from '../constants';
 import { generateSpeech } from '../services/geminiService';
 
@@ -152,7 +152,17 @@ const QuizBlock: React.FC<{ block: QuizBlockType }> = ({ block }) => {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showExplanation, setShowExplanation] = useState(false);
 
-  if (!block.question || !block.options) return null;
+  // Show placeholder if question or options are missing
+  if (!block.question || !block.options || block.options.length === 0) {
+    return (
+      <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
+        <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-2 flex items-center gap-2">
+          <Icons.CheckCircle /> Quiz
+        </h4>
+        <p className="text-zinc-500 italic">Quiz content is loading or unavailable...</p>
+      </div>
+    );
+  }
 
   const handleSelect = (idx: number) => {
     setSelectedIndex(idx);
@@ -254,6 +264,197 @@ const TableBlock: React.FC<{ block: TableBlockType }> = ({ block }) => {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+};
+
+// ============================================
+// NOTES & SUMMARY BLOCK
+// ============================================
+const NotesSummaryBlock: React.FC<{ block: NotesSummaryBlockType }> = ({ block }) => {
+  if (!block.points || block.points.length === 0) return null;
+
+  return (
+    <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 rounded-2xl p-8 border border-zinc-800 my-8">
+      <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-3">
+        <Icons.BookOpen /> Key Takeaways
+      </h3>
+      {block.summary && (
+        <p className="text-zinc-300 mb-6 leading-relaxed border-l-2 border-amber-400 pl-4 italic">
+          {block.summary}
+        </p>
+      )}
+      <ul className="space-y-3">
+        {block.points.map((point, idx) => (
+          <li key={idx} className="flex items-start gap-3 text-zinc-300">
+            <span className="text-emerald-400 font-bold mt-0.5">•</span>
+            <span>{point}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+// ============================================
+// FILL IN THE BLANK BLOCK
+// ============================================
+const FillBlankBlock: React.FC<{ block: FillBlankBlockType }> = ({ block }) => {
+  const [userAnswer, setUserAnswer] = useState('');
+  const [showAnswer, setShowAnswer] = useState(false);
+
+  if (!block.sentence) return null;
+
+  return (
+    <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
+      <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Fill in the Blank</h4>
+      <p className="text-lg text-zinc-200 mb-4">{block.sentence.replace('___', '______')}</p>
+      <div className="flex gap-3">
+        <input
+          type="text"
+          value={userAnswer}
+          onChange={(e) => setUserAnswer(e.target.value)}
+          placeholder="Your answer..."
+          className="flex-1 bg-zinc-950 border border-zinc-700 rounded-lg px-4 py-2 text-white focus:border-blue-500 outline-none"
+          disabled={showAnswer}
+        />
+        <button
+          onClick={() => setShowAnswer(true)}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+          disabled={showAnswer}
+        >
+          Check
+        </button>
+      </div>
+      {showAnswer && (
+        <div className={`mt-4 p-4 rounded-lg ${userAnswer.toLowerCase().trim() === block.answer?.toLowerCase().trim() ? 'bg-emerald-900/30 border border-emerald-700' : 'bg-red-900/30 border border-red-700'}`}>
+          <p className="text-zinc-200">
+            <strong>Answer:</strong> {block.answer}
+          </p>
+          {block.explanation && <p className="text-zinc-400 text-sm mt-2">{block.explanation}</p>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================
+// SHORT ANSWER BLOCK
+// ============================================
+const ShortAnswerBlock: React.FC<{ block: ShortAnswerBlockType }> = ({ block }) => {
+  const [userAnswer, setUserAnswer] = useState('');
+  const [showAnswer, setShowAnswer] = useState(false);
+
+  if (!block.question) return null;
+
+  return (
+    <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
+      <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Short Answer</h4>
+      <p className="text-lg text-zinc-200 mb-4">{block.question}</p>
+      <textarea
+        value={userAnswer}
+        onChange={(e) => setUserAnswer(e.target.value)}
+        placeholder="Write your answer..."
+        rows={3}
+        className="w-full bg-zinc-950 border border-zinc-700 rounded-lg px-4 py-3 text-white focus:border-blue-500 outline-none resize-none"
+        disabled={showAnswer}
+      />
+      <button
+        onClick={() => setShowAnswer(true)}
+        className="mt-3 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+        disabled={showAnswer}
+      >
+        Show Expected Answer
+      </button>
+      {showAnswer && (
+        <div className="mt-4 p-4 bg-zinc-950 border border-zinc-700 rounded-lg">
+          <p className="text-zinc-300"><strong>Expected:</strong> {block.expectedAnswer}</p>
+          {block.explanation && <p className="text-zinc-500 text-sm mt-2">{block.explanation}</p>}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================
+// REFLECTION BLOCK
+// ============================================
+const ReflectionBlock: React.FC<{ block: ReflectionBlockType }> = ({ block }) => {
+  const [response, setResponse] = useState('');
+
+  if (!block.prompt) return null;
+
+  return (
+    <div className="bg-gradient-to-r from-purple-900/20 to-indigo-900/20 rounded-2xl p-6 border border-purple-800/50 my-4">
+      <h4 className="text-sm font-bold text-purple-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+        <Icons.Sparkles /> Reflect
+      </h4>
+      <p className="text-lg text-zinc-200 mb-4">{block.prompt}</p>
+      <textarea
+        value={response}
+        onChange={(e) => setResponse(e.target.value)}
+        placeholder="Take a moment to think and write your thoughts..."
+        rows={4}
+        className="w-full bg-zinc-950/50 border border-purple-800/50 rounded-lg px-4 py-3 text-white focus:border-purple-500 outline-none resize-none"
+      />
+    </div>
+  );
+};
+
+// ============================================
+// MATCH THE FOLLOWING BLOCK
+// ============================================
+const MatchFollowingBlock: React.FC<{ block: MatchFollowingBlockType }> = ({ block }) => {
+  const [matches, setMatches] = useState<Record<number, number>>({});
+  const [showAnswers, setShowAnswers] = useState(false);
+
+  // Show placeholder if pairs are missing or empty
+  if (!block.pairs || block.pairs.length === 0) {
+    return (
+      <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
+        <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-2">Match the Following</h4>
+        <p className="text-zinc-500 italic">Match content is loading or unavailable...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
+      <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Match the Following</h4>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          {block.pairs.map((pair, idx) => (
+            <div key={idx} className="bg-zinc-800 p-3 rounded-lg text-zinc-200">
+              {idx + 1}. {pair.left}
+            </div>
+          ))}
+        </div>
+        <div className="space-y-2">
+          {block.pairs.map((pair, idx) => (
+            <div key={idx} className={`bg-zinc-950 p-3 rounded-lg text-zinc-300 border ${showAnswers ? 'border-emerald-600' : 'border-zinc-700'}`}>
+              {String.fromCharCode(65 + idx)}. {pair.right}
+            </div>
+          ))}
+        </div>
+      </div>
+      {!showAnswers && (
+        <button
+          onClick={() => setShowAnswers(true)}
+          className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium"
+        >
+          Show Answers
+        </button>
+      )}
+      {showAnswers && (
+        <div className="mt-4 p-4 bg-emerald-900/20 border border-emerald-700 rounded-lg">
+          <p className="text-emerald-300 font-medium">Correct matches:</p>
+          <ul className="mt-2 text-zinc-300 text-sm">
+            {block.pairs.map((pair, idx) => (
+              <li key={idx}>{idx + 1} → {String.fromCharCode(65 + idx)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 };
@@ -389,6 +590,16 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
               return <FunFactBlock key={key} block={block as FunFactBlockType} />;
             case 'table':
               return <TableBlock key={key} block={block as TableBlockType} />;
+            case 'notes_summary':
+              return <NotesSummaryBlock key={key} block={block as NotesSummaryBlockType} />;
+            case 'fill_blank':
+              return <FillBlankBlock key={key} block={block as FillBlankBlockType} />;
+            case 'short_answer':
+              return <ShortAnswerBlock key={key} block={block as ShortAnswerBlockType} />;
+            case 'reflection':
+              return <ReflectionBlock key={key} block={block as ReflectionBlockType} />;
+            case 'match_following':
+              return <MatchFollowingBlock key={key} block={block as MatchFollowingBlockType} />;
             default:
               return null;
           }

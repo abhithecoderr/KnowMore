@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Course, Module, ViewState, ChatMessage, CurriculumData } from './types';
+import { Course, Module, Slide, ViewState, ChatMessage, CurriculumData, LearningPreferences } from './types';
 import {
   generateCurriculum,
   generateModuleContent,
@@ -12,6 +12,7 @@ import {
 import { Icons } from './constants';
 import { SlideView } from './components/SlideView';
 import { ChatWidget } from './components/ChatWidget';
+import ScrollingBackground from './components/ScrollingBackground';
 
 function App() {
   // View state
@@ -56,6 +57,14 @@ function App() {
   const clarificationEndRef = useRef<HTMLDivElement>(null);
   const refinementEndRef = useRef<HTMLDivElement>(null);
 
+  // Learning preferences state
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [preferences, setPreferences] = useState<LearningPreferences>({
+    knowledgeLevel: 'intermediate',
+    preferredDepth: 'standard',
+    customInstructions: ''
+  });
+
   // Load history on mount
   useEffect(() => {
     const saved = localStorage.getItem('omni_history');
@@ -64,6 +73,22 @@ function App() {
       catch (e) { console.error("Failed to parse history", e); }
     }
   }, []);
+
+  // Load preferences on mount
+  useEffect(() => {
+    const savedPrefs = localStorage.getItem('omni_preferences');
+    if (savedPrefs) {
+      try { setPreferences(JSON.parse(savedPrefs)); }
+      catch (e) { console.error("Failed to parse preferences", e); }
+    }
+  }, []);
+
+  // Save preferences when changed
+  const updatePreferences = (newPrefs: Partial<LearningPreferences>) => {
+    const updated = { ...preferences, ...newPrefs };
+    setPreferences(updated);
+    localStorage.setItem('omni_preferences', JSON.stringify(updated));
+  };
 
   // Auto-scroll clarification chat
   useEffect(() => {
@@ -109,8 +134,8 @@ function App() {
       } catch (e) { console.error(e); }
       finally { setIsConsulting(false); }
     } else {
-      // Direct mode: Generate curriculum immediately
-      await handleGenerateCurriculumOnly(topic, "");
+      // Direct mode: Generate curriculum immediately with user preferences
+      await handleGenerateCurriculumOnly(topic, "", true);
     }
   };
 
@@ -143,12 +168,17 @@ function App() {
   // CURRICULUM GENERATION (Phase 1 - Structure Only)
   // ============================================
 
-  const handleGenerateCurriculumOnly = async (topicStr: string, context: string) => {
+  const handleGenerateCurriculumOnly = async (topicStr: string, context: string, usePreferences = false) => {
     setIsLoading(true);
     setLoadingText('Designing your learning path...');
 
     try {
-      const curriculumData = await generateCurriculum(topicStr, context);
+      // Pass preferences only when using Quick Generate mode (not chat mode)
+      const curriculumData = await generateCurriculum(
+        topicStr,
+        context,
+        usePreferences ? preferences : undefined
+      );
       setCurriculum(curriculumData);
       setRefinementMessages([]);
       setView('CURRICULUM_REVIEW');
@@ -276,6 +306,11 @@ function App() {
 
           const updated = { ...prevCourse, modules: updatedModules };
           currentCourse = updated;
+
+          // Save updated course to history to persist image URLs
+          const newHistory = [updated, ...history.filter(h => h.id !== updated.id)].slice(0, 10);
+          localStorage.setItem('omni_history', JSON.stringify(newHistory));
+
           return updated;
         });
       };
@@ -296,7 +331,7 @@ function App() {
         ...newCourse,
         modules: newCourse.modules.map((m, idx) =>
           idx === 0
-            ? { ...m, slides: module1Content.slides, isLoaded: true }
+            ? { ...m, slides: module1Content.slides as unknown as Slide[], isLoaded: true }
             : m
         )
       };
@@ -336,6 +371,12 @@ function App() {
       try {
         console.log(`\n🔄 Background: Generating module ${i + 1}/${currentCourse.modules.length}...`);
 
+        // Rate limiting: wait 5s between modules to respect API limits
+        if (i > startIndex) {
+          console.log('   ⏳ Waiting 5s before next module...');
+          await new Promise(r => setTimeout(r, 5000));
+        }
+
         // Callback for progressive loading of this specific module
         const MODULE_INDEX = i;
         const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
@@ -359,7 +400,15 @@ function App() {
               return { ...mod, slides: updatedSlides };
             });
 
-            return { ...prevCourse, modules: updatedModules };
+            const updated = { ...prevCourse, modules: updatedModules };
+
+            // Save updated course to history to persist image URLs
+            const savedHistory = localStorage.getItem('omni_history');
+            const existingHistory = savedHistory ? JSON.parse(savedHistory) : [];
+            const newHistory = [updated, ...existingHistory.filter((h: Course) => h.id !== updated.id)].slice(0, 10);
+            localStorage.setItem('omni_history', JSON.stringify(newHistory));
+
+            return updated;
           });
         };
 
@@ -400,7 +449,7 @@ function App() {
             ...prevCourse,
             modules: prevCourse.modules.map((m, idx) =>
               idx === i
-                ? { ...m, slides: mergedSlides, isLoaded: true }
+                ? { ...m, slides: mergedSlides as unknown as Slide[], isLoaded: true }
                 : m
             )
           };
@@ -411,7 +460,7 @@ function App() {
           ...updatedCourse,
           modules: updatedCourse.modules.map((m, idx) =>
             idx === i
-              ? { ...m, slides: moduleContent.slides, isLoaded: true }
+              ? { ...m, slides: moduleContent.slides as unknown as Slide[], isLoaded: true }
               : m
           )
         };
@@ -599,11 +648,9 @@ function App() {
         </div>
 
         {/* Main Content Area */}
-        <div className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-y-auto">
-          {/* Background glow */}
-          <div className="fixed top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
-            <div className="absolute top-[30%] left-[40%] w-[50%] h-[50%] bg-amber-400/5 rounded-full blur-[120px]"></div>
-          </div>
+        <div className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-hidden">
+          {/* Animated Scrolling Image Background */}
+          <ScrollingBackground />
 
           <div className="z-10 max-w-xl w-full text-center space-y-8 animate-fade-in-up">
             {/* Mobile Logo */}
@@ -650,7 +697,7 @@ function App() {
                 </button>
               </div>
 
-              {/* Mode Toggle */}
+              {/* Mode Toggle and Settings */}
               <div className="flex justify-center items-center gap-4 text-sm">
                 <span className={`transition-colors ${!isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Quick Generate</span>
                 <button
@@ -660,6 +707,16 @@ function App() {
                   <div className={`w-5 h-5 rounded-full bg-black transition-transform ${isChatMode ? 'translate-x-7' : 'translate-x-0'}`}></div>
                 </button>
                 <span className={`transition-colors ${isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Guided Chat</span>
+                {/* Settings button - only show in Quick Generate mode */}
+                {!isChatMode && (
+                  <button
+                    onClick={() => setShowSettingsModal(true)}
+                    className="ml-2 p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+                    title="Personalization Settings"
+                  >
+                    <Icons.Settings />
+                  </button>
+                )}
               </div>
 
               <p className="text-zinc-600 text-sm">
@@ -671,6 +728,77 @@ function App() {
 
             {isLoading && (
               <div className="text-amber-400 text-sm animate-pulse tracking-wide">{loadingText}</div>
+            )}
+
+            {/* Settings Modal */}
+            {showSettingsModal && (
+              <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setShowSettingsModal(false)}>
+                <div
+                  className="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 max-w-md w-full shadow-2xl"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xl font-bold text-white">Personalization Settings</h3>
+                    <button
+                      onClick={() => setShowSettingsModal(false)}
+                      className="text-zinc-500 hover:text-white transition-colors"
+                    >
+                      <Icons.X />
+                    </button>
+                  </div>
+
+                  <div className="space-y-5">
+                    {/* Knowledge Level */}
+                    <div>
+                      <label className="block text-zinc-400 text-sm font-medium mb-2">Knowledge Level</label>
+                      <select
+                        value={preferences.knowledgeLevel}
+                        onChange={e => updatePreferences({ knowledgeLevel: e.target.value as LearningPreferences['knowledgeLevel'] })}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-white focus:border-amber-400 focus:outline-none transition-colors"
+                      >
+                        <option value="beginner">Beginner - New to this topic</option>
+                        <option value="intermediate">Intermediate - Some familiarity</option>
+                        <option value="advanced">Advanced - Good understanding</option>
+                        <option value="expert">Expert - Deep expertise</option>
+                      </select>
+                    </div>
+
+                    {/* Preferred Depth */}
+                    <div>
+                      <label className="block text-zinc-400 text-sm font-medium mb-2">Preferred Depth</label>
+                      <select
+                        value={preferences.preferredDepth}
+                        onChange={e => updatePreferences({ preferredDepth: e.target.value as LearningPreferences['preferredDepth'] })}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-white focus:border-amber-400 focus:outline-none transition-colors"
+                      >
+                        <option value="quick">Quick Overview - 3 modules</option>
+                        <option value="standard">Standard Learning - 4 modules</option>
+                        <option value="deep">Deep Study - 5 modules</option>
+                        <option value="comprehensive">Comprehensive Mastery - 6 modules</option>
+                      </select>
+                    </div>
+
+                    {/* Custom Instructions */}
+                    <div>
+                      <label className="block text-zinc-400 text-sm font-medium mb-2">Custom Instructions (Optional)</label>
+                      <textarea
+                        value={preferences.customInstructions}
+                        onChange={e => updatePreferences({ customInstructions: e.target.value })}
+                        placeholder="E.g., Focus on practical examples, include code snippets, use analogies from sports..."
+                        rows={3}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-white placeholder-zinc-500 focus:border-amber-400 focus:outline-none transition-colors resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => setShowSettingsModal(false)}
+                    className="w-full mt-6 bg-amber-400 hover:bg-amber-500 text-black font-semibold py-3 rounded-xl transition-colors"
+                  >
+                    Save Settings
+                  </button>
+                </div>
+              </div>
             )}
 
             {/* Mobile History */}

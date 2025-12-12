@@ -12,6 +12,13 @@ export interface ChatMessage {
 // App view states
 export type ViewState = 'HOME' | 'CLARIFICATION' | 'CURRICULUM_REVIEW' | 'PLANNER' | 'LEARNING';
 
+// Learning preferences for personalization
+export interface LearningPreferences {
+  knowledgeLevel: 'beginner' | 'intermediate' | 'advanced' | 'expert';
+  preferredDepth: 'quick' | 'standard' | 'deep' | 'comprehensive';
+  customInstructions: string;
+}
+
 // ============================================
 // Curriculum Types (for two-phase generation)
 // ============================================
@@ -76,7 +83,64 @@ export interface TableBlock {
   markdown: string;
 }
 
-export type ContentBlock = TextBlock | ImageBlock | QuizBlock | FunFactBlock | TableBlock;
+// New block types for Exercise slides
+export interface FillBlankBlock {
+  type: 'fill_blank';
+  sentence: string;       // Sentence with ___ for blanks
+  answer: string;         // Correct answer
+  explanation?: string;
+}
+
+export interface ShortAnswerBlock {
+  type: 'short_answer';
+  question: string;
+  expectedAnswer: string; // For AI evaluation
+  explanation?: string;
+}
+
+export interface AssertionReasonBlock {
+  type: 'assertion_reason';
+  assertion: string;
+  reason: string;
+  correctOption: 'both_true_reason_correct' | 'both_true_reason_incorrect' | 'assertion_true_reason_false' | 'assertion_false_reason_true' | 'both_false';
+  explanation: string;
+}
+
+export interface MatchFollowingBlock {
+  type: 'match_following';
+  pairs: { left: string; right: string }[];
+}
+
+export interface ImageRecognitionBlock {
+  type: 'image_recognition';
+  imageKeywords: string;
+  imageUrl?: string | null;
+  question: string;
+  answer: string;
+}
+
+export interface ReflectionBlock {
+  type: 'reflection';
+  prompt: string;         // Open-ended reflection question
+}
+
+export interface ActivityBlock {
+  type: 'activity';
+  instruction: string;    // Outside/practical activity task
+}
+
+// Notes & Summary block
+export interface NotesSummaryBlock {
+  type: 'notes_summary';
+  summary?: string;       // Summary paragraph introducing the key points
+  points: string[];       // Bullet points of key takeaways
+}
+
+export type ContentBlock =
+  | TextBlock | ImageBlock | QuizBlock | FunFactBlock | TableBlock
+  | FillBlankBlock | ShortAnswerBlock | AssertionReasonBlock
+  | MatchFollowingBlock | ImageRecognitionBlock | ReflectionBlock
+  | ActivityBlock | NotesSummaryBlock;
 
 // ============================================
 // Slide & Module Types

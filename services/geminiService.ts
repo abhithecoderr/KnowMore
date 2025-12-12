@@ -10,11 +10,37 @@ import { GoogleGenAI, Type } from "@google/genai";
 // ============================================
 const API_KEY = process.env.API_KEY || "";
 const PIXABAY_KEY = "53631556-267a3b1b6dca0533d6b8fe2fa";
-const MODEL = "gemma-3-27b-it";
-const SPEECH_MODEL = "gemini-2.5-flash-preview-tts";
-const CHAT_MODEL = "gemma-3-27b-it";
+
+// Model configuration - customize models for each role
+const MODELS = {
+  CONSULTANT: "gemma-3-27b-it",       // Pre-curriculum chat
+  CURRICULUM: "gemini-robotics-er-1.5-preview",       // Curriculum structure generation
+  CONTENT: "gemini-robotics-er-1.5-preview", //gemini-robotics-er-1.5-preview,          // Slide content generation
+  CHAT: "gemma-3-27b-it",             // Learning view chat assistant
+  IMAGE_ANALYSIS: "gemma-3-12b-it",   // Image selection
+  ANSWER_EVAL: "gemma-3-12b-it",      // User answer evaluation
+  TTS: "gemini-2.5-flash-preview-tts" // Text-to-speech
+};
+
 
 const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+// Rate limiting for AI image analysis calls (20 per minute = 3s between calls)
+let lastImageAnalysisTime = 0;
+const MIN_ANALYSIS_INTERVAL_MS = 3000; // 3 seconds = 20 per minute
+
+async function rateLimitImageAnalysis(): Promise<void> {
+  const now = Date.now();
+  const timeSinceLastCall = now - lastImageAnalysisTime;
+
+  if (timeSinceLastCall < MIN_ANALYSIS_INTERVAL_MS) {
+    const waitTime = MIN_ANALYSIS_INTERVAL_MS - timeSinceLastCall;
+    console.log(`      ⏳ Rate limit: waiting ${(waitTime/1000).toFixed(1)}s`);
+    await new Promise(r => setTimeout(r, waitTime));
+  }
+
+  lastImageAnalysisTime = Date.now();
+}
 
 // Nature/wildlife keywords that work better with Pixabay
 const NATURE_KEYWORDS = ['nature', 'wildlife', 'animal', 'forest', 'ocean', 'mountain', 'landscape', 'flower', 'bird', 'tree', 'sunset', 'sky'];
@@ -45,9 +71,12 @@ export interface CurriculumData {
   modules: CurriculumModule[];
 }
 
-// Slide content types
+// Slide content types - matches ContentBlock in types.ts
 export interface SlideBlock {
-  type: "text" | "image" | "quiz" | "fun_fact" | "table";
+  type: "text" | "image" | "quiz" | "fun_fact" | "table"
+      | "fill_blank" | "short_answer" | "assertion_reason"
+      | "match_following" | "image_recognition" | "reflection"
+      | "activity" | "notes_summary";
   content?: string;
   keywords?: string;
   caption?: string;
@@ -58,6 +87,19 @@ export interface SlideBlock {
   explanation?: string;
   fact?: string;
   markdown?: string;
+  // New fields for Exercise blocks
+  sentence?: string;         // fill_blank
+  answer?: string;           // fill_blank, image_recognition
+  expectedAnswer?: string;   // short_answer
+  assertion?: string;        // assertion_reason
+  reason?: string;           // assertion_reason
+  correctOption?: string;    // assertion_reason
+  pairs?: { left: string; right: string }[];  // match_following
+  imageKeywords?: string;    // image_recognition
+  prompt?: string;           // reflection
+  instruction?: string;      // activity
+  points?: string[];         // notes_summary
+  summary?: string;          // notes_summary - summary paragraph
 }
 
 export interface SlideData {
@@ -269,12 +311,12 @@ async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]
       origin: '*',
       action: 'query',
       generator: 'search',
-      gsrsearch: `${cleanKeywords} filetype:bitmap -fileres:0`, // Only bitmap images, exclude tiny
+      gsrsearch: `${cleanKeywords} filetype:bitmap -fileres:0 `, // Curated images with 'depicts' metadata
       gsrnamespace: '6', // File namespace
       gsrlimit: String(Math.min(count + 5, 10)), // Fewer candidates needed
       prop: 'imageinfo',
       iiprop: 'url|mime|size|mediatype', // Get full metadata
-      iiurlwidth: '200', // TINY thumbnails for fast conversion (~15-40KB)
+      iiurlwidth: '400', // Medium thumbnails for good detail (~30-80KB)
       format: 'json'
     });
 
@@ -323,8 +365,14 @@ async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]
   }
 }
 
-/** Fetch images from Pixabay (fallback for nature/abstract topics) */
-async function fetchFromPixabay(keywords: string, count = 5): Promise<string[]> {
+/** Pixabay image with dual URLs */
+interface PixabayImage {
+  analysisUrl: string;  // previewURL - low res for AI
+  displayUrl: string;   // webformatURL - high res for frontend
+}
+
+/** Fetch images from Pixabay with dual URLs for analysis/display */
+async function fetchFromPixabay(keywords: string, count = 3): Promise<PixabayImage[]> {
   try {
     const query = keywords.replace(/[^a-zA-Z0-9\s]/g, '').trim().split(/\s+/).slice(0, 3).join('+');
     const url = `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${query}&orientation=horizontal&per_page=${count + 3}&safesearch=true`;
@@ -333,7 +381,10 @@ async function fetchFromPixabay(keywords: string, count = 5): Promise<string[]> 
     const data = await res.json();
 
     if (data.hits?.length > 0) {
-      return data.hits.slice(0, count).map((h: any) => h.webformatURL);
+      return data.hits.slice(0, count).map((h: any) => ({
+        analysisUrl: h.previewURL,    // Small URL for AI analysis
+        displayUrl: h.webformatURL    // Large URL for frontend display
+      }));
     }
   } catch (e) {
     console.warn("Pixabay fetch failed:", e);
@@ -347,23 +398,15 @@ function isNatureTopic(keywords: string): boolean {
   return NATURE_KEYWORDS.some(k => lower.includes(k));
 }
 
-/** Fetch image candidates from appropriate source */
-export async function fetchImageCandidates(keywords: string, count = 3): Promise<string[]> {
-  // Use Pixabay for nature topics, Wikimedia for educational content
-  if (isNatureTopic(keywords)) {
-    const pixabay = await fetchFromPixabay(keywords, count);
-    if (pixabay.length > 0) return pixabay;
-  }
 
-  // Try Wikimedia first for educational content
+/** Legacy function for backward compatibility */
+export async function fetchImageCandidates(keywords: string, count = 4): Promise<string[]> {
   const wiki = await fetchFromWikimedia(keywords, count);
   if (wiki.length > 0) return wiki;
 
-  // Fallback to Pixabay
-  const pixabay = await fetchFromPixabay(keywords, count);
-  if (pixabay.length > 0) return pixabay;
+  const pixabay = await fetchFromPixabay(keywords, 3);
+  if (pixabay.length > 0) return pixabay.map(p => p.displayUrl);
 
-  // Placeholder if nothing found
   return [`https://placehold.co/800x450/27272a/71717a?text=${encodeURIComponent(keywords.slice(0, 20))}`];
 }
 
@@ -371,12 +414,13 @@ export async function fetchImageCandidates(keywords: string, count = 3): Promise
 interface ImageSelectionResult {
   selectedIndex: number | null;  // null = none appropriate
   suggestedKeyword?: string;     // alternate keyword to try
-  selectedUrl?: string;
+  selectedUrl?: string;          // URL for display
 }
 
 /** Analyze images with AI and get selection or alternate keyword suggestion */
 async function analyzeImagesWithAI(
   imageUrls: string[],
+  displayUrls: string[],  // Separate array for actual display URLs
   slideTitle: string,
   slideContext: string,
   keywords: string,
@@ -392,50 +436,39 @@ async function analyzeImagesWithAI(
 
   if (imageUrls.length === 1) {
     console.log(`      → Using only available image`);
-    return { selectedIndex: 0, selectedUrl: imageUrls[0] };
+    return { selectedIndex: 0, selectedUrl: displayUrls[0] };
   }
 
   try {
-    // Convert URLs to Base64 parts sequentially with progressive backoff
-    const validParts: { part: any; url: string; index: number }[] = [];
+    // Convert URLs to Base64 parts sequentially
+    const validParts: { part: any; displayUrl: string; index: number }[] = [];
     const conversionStart = Date.now();
 
-    console.log(`\\n      Starting sequential image conversion...`);
+    console.log(`\n      Starting sequential image conversion...`);
 
     for (let i = 0; i < imageUrls.length; i++) {
-      console.log(`\\n      [${i + 1}/${imageUrls.length}] Processing...`);
+      console.log(`\n      [${i + 1}/${imageUrls.length}] Processing...`);
 
       const part = await urlToBase64Part(imageUrls[i]);
       if (part) {
-        validParts.push({ part, url: imageUrls[i], index: i });
+        validParts.push({ part, displayUrl: displayUrls[i], index: i });
       }
 
-      // Small delay between fetches (50ms) to prevent rate limiting
+      // Small delay between fetches
       if (i < imageUrls.length - 1) {
         await new Promise(r => setTimeout(r, 50));
       }
     }
 
     const conversionTime = ((Date.now() - conversionStart) / 1000).toFixed(1);
-    console.log(`\\n      📊 Conversion complete in ${conversionTime}s:`);
-    console.log(`         - Successful: ${validParts.length}/${imageUrls.length}`);
-    console.log(`         - Failed: ${imageUrls.length - validParts.length}`);
+    console.log(`\n      📊 Conversion complete in ${conversionTime}s: ${validParts.length}/${imageUrls.length}`);
 
     if (validParts.length === 0) {
       console.log(`      → Failed to load any images`);
       return { selectedIndex: null, suggestedKeyword: allowKeywordSuggestion ? keywords : undefined };
     }
 
-    // Limit to max 3 images for AI analysis to prevent overwhelming
-    if (validParts.length > 3) {
-      console.log(`      ⚙️ Limiting ${validParts.length} → 3 images (using smallest by base64 size)`);
-      // Sort by base64 size (smaller = faster for AI) and take top 3
-      validParts.sort((a, b) => a.part.inlineData.data.length - b.part.inlineData.data.length);
-      validParts.splice(3); // Keep only first 3
-      console.log(`      → Selected images: indices ${validParts.map(p => p.index + 1).join(', ')}`);
-    }
-
-    // Build multimodal content with structured output request
+    // Build multimodal content
     const contents: any[] = [
       { text: `You are selecting the best image for an educational slide.
 
@@ -454,7 +487,6 @@ I have ${validParts.length} candidate images. Analyze each one.
       contents.push({ text: '\n\n' });
     });
 
-    // Different prompt based on whether we allow keyword suggestion
     if (allowKeywordSuggestion) {
       contents.push({
         text: `TASK: Select the BEST image for this educational slide.
@@ -473,45 +505,38 @@ ALT_KEYWORD: [if NONE, suggest a better 2-4 word search keyword, otherwise leave
     } else {
       contents.push({
         text: `TASK: Select the BEST image for this educational slide.
-
-For EACH image, describe what you see (1 sentence).
-Then pick the best one, even if not perfect.
+Pick the best one, even if not perfect.
 
 RESPOND IN THIS EXACT FORMAT:
-Image 1: [what you see]
-Image 2: [what you see]
-...
 SELECTED: [number] because [brief reason]`
       });
     }
 
+    await rateLimitImageAnalysis();
+
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: MODELS.IMAGE_ANALYSIS,
       contents: contents
     });
 
     const responseText = response.text || "";
 
-    // Log the AI's full reasoning
-    console.log(`      📝 AI Analysis:`);
-    responseText.split('\n').forEach(line => {
+    // Log the AI's analysis for debugging
+    console.log(`      📝 AI Response:`);
+    responseText.split('\n').slice(0, 10).forEach(line => {
       if (line.trim()) console.log(`         ${line.trim()}`);
     });
 
-    // Parse response for keyword suggestion mode
+    // Parse response
     if (allowKeywordSuggestion) {
       const decisionMatch = responseText.match(/DECISION:\s*(SELECTED|NONE)/i);
       const selectedMatch = responseText.match(/SELECTED_NUMBER:\s*(\d+)/i);
       const altKeywordMatch = responseText.match(/ALT_KEYWORD:\s*([^\n]+)/i);
 
       if (decisionMatch?.[1]?.toUpperCase() === 'NONE') {
-        let suggestedKeyword = altKeywordMatch?.[1]?.trim();
-        // Strip surrounding quotes from AI response
-        if (suggestedKeyword) {
-          suggestedKeyword = suggestedKeyword.replace(/^["']+|["']+$/g, '').trim();
-        }
+        let suggestedKeyword = altKeywordMatch?.[1]?.trim()?.replace(/^["']+|["']+$/g, '');
         if (suggestedKeyword && suggestedKeyword.length > 0 && suggestedKeyword.toLowerCase() !== 'empty') {
-          console.log(`      🔄 No suitable image found. AI suggests: "${suggestedKeyword}"`);
+          console.log(`      🔄 No suitable image. AI suggests: "${suggestedKeyword}"`);
           return { selectedIndex: null, suggestedKeyword };
         }
       }
@@ -519,25 +544,24 @@ SELECTED: [number] because [brief reason]`
       const idx = selectedMatch ? parseInt(selectedMatch[1], 10) - 1 : -1;
       if (idx >= 0 && idx < validParts.length) {
         console.log(`      ✅ Selected image ${idx + 1}`);
-        return { selectedIndex: validParts[idx].index, selectedUrl: validParts[idx].url };
+        return { selectedIndex: validParts[idx].index, selectedUrl: validParts[idx].displayUrl };
       }
     } else {
-      // Simple selection mode
       const match = responseText.match(/SELECTED:\s*(\d)/i);
       const idx = match ? parseInt(match[1], 10) - 1 : 0;
       if (idx >= 0 && idx < validParts.length) {
         console.log(`      ✅ Selected image ${idx + 1}`);
-        return { selectedIndex: validParts[idx].index, selectedUrl: validParts[idx].url };
+        return { selectedIndex: validParts[idx].index, selectedUrl: validParts[idx].displayUrl };
       }
     }
 
-    // Fallback: use first image
+    // Fallback: first image
     console.log(`      → Defaulting to first loaded image`);
-    return { selectedIndex: validParts[0].index, selectedUrl: validParts[0].url };
+    return { selectedIndex: validParts[0].index, selectedUrl: validParts[0].displayUrl };
 
   } catch (e) {
     console.warn(`      ⚠️ AI selection failed:`, e);
-    return { selectedIndex: 0, selectedUrl: imageUrls[0] };
+    return { selectedIndex: 0, selectedUrl: displayUrls[0] };
   }
 }
 
@@ -547,41 +571,120 @@ function getPlaceholderUrl(keywords: string): string {
 }
 
 /**
- * Select the best image with fallback keyword retry.
- * If AI rejects all images, it can suggest alternate keywords and retry once.
+ * Select the best image with Wikimedia-priority flow.
+ *
+ * STANDARD FLOW:
+ * 1. Wikimedia 5 images → AI analysis
+ * 2. If rejected → Wikimedia 5 with AI-suggested keyword
+ * 3. If still rejected → Wikimedia 5 (3rd keyword) + Pixabay 3 backup
+ *
+ * NATURE/ANIMAL TOPICS:
+ * After 1st Wikimedia try, immediately include Pixabay
  */
 export async function selectBestImage(
-  imageUrls: string[],
   slideTitle: string,
   slideContext: string,
   keywords: string = ""
 ): Promise<string> {
-  // First attempt with original images
-  let result = await analyzeImagesWithAI(imageUrls, slideTitle, slideContext, keywords, true);
+  console.log(`\n📷 Image Selection for: "${slideTitle}"`);
+  console.log(`   Keywords: "${keywords}"`);
 
-  // If we got a selection, return it
-  if (result.selectedUrl) {
-    return result.selectedUrl;
+  const isNature = isNatureTopic(keywords);
+  let suggestedKeyword = keywords;
+  let attempt = 0;
+
+  // ATTEMPT 1: Wikimedia with original keywords
+  attempt++;
+  console.log(`\n   🔍 Attempt ${attempt}: Wikimedia (${keywords})`);
+  const wiki1 = await fetchFromWikimedia(keywords, 5);
+
+  if (wiki1.length > 0) {
+    const result = await analyzeImagesWithAI(wiki1, wiki1, slideTitle, slideContext, keywords, true);
+    if (result.selectedUrl) {
+      console.log(`   ✅ Selected from Wikimedia attempt 1`);
+      return result.selectedUrl;
+    }
+    if (result.suggestedKeyword) {
+      suggestedKeyword = result.suggestedKeyword;
+      console.log(`   💡 AI suggests: "${suggestedKeyword}"`);
+    }
   }
 
-  // If AI suggested an alternate keyword, retry with new images
-  if (result.suggestedKeyword && result.suggestedKeyword !== keywords) {
-    console.log(`\n   🔄 Retrying with alternate keyword: "${result.suggestedKeyword}"`);
+  // For NATURE topics: Try Pixabay immediately after first Wikimedia failure
+  if (isNature) {
+    attempt++;
+    console.log(`\n   � Attempt ${attempt}: Pixabay for nature topic (${keywords})`);
+    const pixabay1 = await fetchFromPixabay(keywords, 3);
 
-    const altCandidates = await fetchImageCandidates(result.suggestedKeyword, 3);
-    if (altCandidates.length > 0 && !altCandidates[0].includes('placehold.co')) {
-      // Second attempt - no more keyword suggestions allowed
-      result = await analyzeImagesWithAI(altCandidates, slideTitle, slideContext, result.suggestedKeyword, false);
-
+    if (pixabay1.length > 0) {
+      const result = await analyzeImagesWithAI(
+        pixabay1.map(p => p.analysisUrl),
+        pixabay1.map(p => p.displayUrl),
+        slideTitle, slideContext, keywords, true
+      );
       if (result.selectedUrl) {
+        console.log(`   ✅ Selected from Pixabay (nature topic)`);
         return result.selectedUrl;
+      }
+      if (result.suggestedKeyword) {
+        suggestedKeyword = result.suggestedKeyword;
       }
     }
   }
 
-  // Final fallback: use first original image or placeholder
-  console.log(`      → Using fallback image`);
-  return imageUrls[0] || getPlaceholderUrl(keywords);
+  // ATTEMPT 2: Wikimedia with alternate keyword
+  if (suggestedKeyword && suggestedKeyword !== keywords) {
+    attempt++;
+    console.log(`\n   � Attempt ${attempt}: Wikimedia (${suggestedKeyword})`);
+    const wiki2 = await fetchFromWikimedia(suggestedKeyword, 5);
+
+    if (wiki2.length > 0) {
+      const result = await analyzeImagesWithAI(wiki2, wiki2, slideTitle, slideContext, suggestedKeyword, true);
+      if (result.selectedUrl) {
+        console.log(`   ✅ Selected from Wikimedia attempt 2`);
+        return result.selectedUrl;
+      }
+      if (result.suggestedKeyword && result.suggestedKeyword !== suggestedKeyword) {
+        suggestedKeyword = result.suggestedKeyword;
+        console.log(`   💡 AI suggests: "${suggestedKeyword}"`);
+      }
+    }
+  }
+
+  // ATTEMPT 3: Wikimedia with 3rd keyword + Pixabay backup
+  attempt++;
+  console.log(`\n   🔍 Attempt ${attempt}: Wikimedia + Pixabay backup (${suggestedKeyword})`);
+
+  const [wiki3, pixabay3] = await Promise.all([
+    fetchFromWikimedia(suggestedKeyword, 5),
+    fetchFromPixabay(suggestedKeyword, 3)
+  ]);
+
+  // Try Wikimedia first
+  if (wiki3.length > 0) {
+    const result = await analyzeImagesWithAI(wiki3, wiki3, slideTitle, slideContext, suggestedKeyword, false);
+    if (result.selectedUrl) {
+      console.log(`   ✅ Selected from Wikimedia attempt 3`);
+      return result.selectedUrl;
+    }
+  }
+
+  // Try Pixabay backup
+  if (pixabay3.length > 0) {
+    const result = await analyzeImagesWithAI(
+      pixabay3.map(p => p.analysisUrl),
+      pixabay3.map(p => p.displayUrl),
+      slideTitle, slideContext, suggestedKeyword, false
+    );
+    if (result.selectedUrl) {
+      console.log(`   ✅ Selected from Pixabay backup`);
+      return result.selectedUrl;
+    }
+  }
+
+  // Final fallback: Return first available image or placeholder
+  console.log(`   ⚠️ No suitable image found, using fallback`);
+  return wiki1[0] || wiki3[0] || pixabay3[0]?.displayUrl || getPlaceholderUrl(keywords);
 }
 
 // ============================================
@@ -625,27 +728,56 @@ const CURRICULUM_SCHEMA = {
 
 export async function generateCurriculum(
   topic: string,
-  additionalContext = ""
+  additionalContext = "",
+  preferences?: { knowledgeLevel?: string; preferredDepth?: string; customInstructions?: string }
 ): Promise<CurriculumData> {
   console.log(`\n📚 Generating curriculum for: "${topic}"...`);
   const startTime = performance.now();
 
-  const prompt = `Create a comprehensive, well-structured curriculum for learning about: "${topic}"
+  // Build personalization section from preferences
+  const depthMapping: Record<string, number> = {
+    'quick': 3,
+    'standard': 4,
+    'deep': 5,
+    'comprehensive': 6
+  };
 
-${additionalContext ? `Additional context: ${additionalContext}\n` : ""}
+  const targetModules = preferences?.preferredDepth ? depthMapping[preferences.preferredDepth] || 4 : null;
 
-Design a COMPLETE learning journey that:
-- Builds understanding progressively from foundations to mastery
-- Creates meaningful connections between concepts
-- Ensures each module reinforces and extends previous learning
-- Results in genuine, lasting comprehension
+  const personalizationSection = preferences ? `
+=== LEARNER PREFERENCES ===
+Knowledge Level: ${preferences.knowledgeLevel || 'intermediate'}
+${targetModules ? `Preferred Depth: ${targetModules} modules (${preferences.preferredDepth})` : ''}
+${preferences.customInstructions ? `Special Instructions: ${preferences.customInstructions}` : ''}
 
-Generate 4-6 modules with 3-5 slides each. Each slide should cover one focused concept.
+Adapt the content complexity and language to match their knowledge level.
+` : '';
 
-Return JSON with this structure:
+  const prompt = `Create a curriculum for learning about: "${topic}"
+
+${additionalContext ? `User context: ${additionalContext}\n` : ""}
+${personalizationSection}
+=== STRUCTURE ===
+${targetModules ? `Create exactly ${targetModules} modules based on user preference.` : `Decide the appropriate DEPTH based on topic complexity and user context:
+- 3 modules: Quick overview, simple curiosity
+- 4 modules: Standard learning
+- 5 modules: In-depth study
+- 6 modules: Comprehensive mastery`}
+
+MINIMUM: 3 modules | MAXIMUM: 6 modules
+Each module: 3-5 slides covering focused concepts
+
+=== PHILOSOPHY ===
+Create a genuine learning journey:
+- Build understanding progressively
+- Connect concepts naturally
+- Make each module feel purposeful
+- Let the topic guide the structure (no forced formulas)
+
+=== OUTPUT FORMAT ===
 {
   "title": "Engaging course title",
-  "overview": "2-3 sentences describing the learning journey",
+  "overview": "2-3 sentences describing what the learner will achieve",
   "description": "Brief tagline",
   "learningGoals": ["Goal 1", "Goal 2", "Goal 3", "Goal 4", "Goal 5"],
   "modules": [
@@ -658,13 +790,17 @@ Return JSON with this structure:
       ]
     }
   ]
-}`;
+}
+
+Return ONLY valid JSON.`;
 
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: MODELS.CURRICULUM,
       contents: prompt,
-      config: {}
+      config: {
+        thinkingConfig: { thinkingBudget: 0 }
+      }
     });
 
     if (!response.text) throw new Error("No curriculum generated");
@@ -700,7 +836,7 @@ Return JSON:
 
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: MODELS.CONTENT,
       contents: prompt,
       config: {}
     });
@@ -727,7 +863,7 @@ Return the updated curriculum as JSON with same structure.`;
 
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: MODELS.CONTENT,
       contents: prompt,
       config: {}
     });
@@ -752,81 +888,165 @@ export async function generateModuleContent(
   const startTime = performance.now();
 
   const slidesList = slideTitles.map((t, i) => `${i + 1}. ${t}`).join('\n');
+  const totalSlides = slideTitles.length + 3; // Module Intro + Content slides + Summary + Exercise
 
-  const prompt = `You are creating rich, educational slide content that forms a CONNECTED learning experience.
+  // Define strict schemas for each block type
+  const SCHEMA_DEFINITIONS = `
+=== STRICT BLOCK SCHEMAS ===
+You MUST follow these exact schemas. Any deviation will break the app.
+
+TEXT_BLOCK:
+{ "type": "text", "content": "Your educational text here..." }
+
+IMAGE_BLOCK:
+{ "type": "image", "keywords": "elephant africa", "caption": "African elephant in savanna", "position": "hero" }
+- keywords: EXACTLY 2 words, real photographable subjects (see IMAGE KEYWORDS section)
+- position: "hero" (centered) | "intro" (left-aligned at start) | "grid" (in a row)
+
+QUIZ_BLOCK (REQUIRED FIELDS - ALL MUST BE PRESENT):
+{
+  "type": "quiz",
+  "question": "What is the capital of France?",
+  "options": [
+    { "text": "London", "isCorrect": false },
+    { "text": "Paris", "isCorrect": true },
+    { "text": "Berlin", "isCorrect": false },
+    { "text": "Madrid", "isCorrect": false }
+  ],
+  "explanation": "Paris has been the capital of France since the 10th century."
+}
+- MUST have exactly 4 options
+- MUST have exactly ONE option with isCorrect: true
+- MUST have question, options, and explanation fields
+
+MATCH_FOLLOWING_BLOCK (REQUIRED FIELDS):
+{
+  "type": "match_following",
+  "pairs": [
+    { "left": "H2O", "right": "Water" },
+    { "left": "NaCl", "right": "Salt" },
+    { "left": "CO2", "right": "Carbon Dioxide" }
+  ]
+}
+- MUST have 3-5 pairs
+- Each pair MUST have "left" and "right" string fields
+
+FILL_BLANK_BLOCK:
+{ "type": "fill_blank", "sentence": "The ___ is the powerhouse of the cell.", "answer": "mitochondria", "explanation": "..." }
+
+SHORT_ANSWER_BLOCK:
+{ "type": "short_answer", "question": "...", "expectedAnswer": "...", "explanation": "..." }
+
+FUN_FACT_BLOCK:
+{ "type": "fun_fact", "fact": "Honey never spoils - archaeologists found 3000-year-old honey in Egyptian tombs!" }
+
+NOTES_SUMMARY_BLOCK:
+{ "type": "notes_summary", "summary": "This module covered X, Y, and Z...", "points": ["Point 1", "Point 2", "Point 3"] }
+- summary: 2-3 sentence paragraph
+- points: 6-10 bullet points
+`;
+
+  const prompt = `Generate slide content for a learning module.
 
 COURSE: "${courseTitle}"
 MODULE: "${moduleTitle}" - ${moduleDescription}
 
-SLIDES TO CREATE:
+CONTENT SLIDES TO CREATE (after intro):
 ${slidesList}
 
-${previousContext ? `PREVIOUS CONTEXT:\n${previousContext}\n` : ""}
+${previousContext ? `PREVIOUS MODULES:\n${previousContext}\n` : ""}
+${SCHEMA_DEFINITIONS}
 
-=== CONTENT PHILOSOPHY ===
-Create content that builds GENUINE UNDERSTANDING:
-- Each paragraph should flow naturally into the next
-- Use analogies and real-world examples
-- Connect new concepts to what was learned before
-- Help the learner see the "big picture"
+=== IMAGE KEYWORDS (CRITICAL FOR SEARCH) ===
+Keywords are used to search Wikimedia Commons. Use REAL, PHOTOGRAPHABLE subjects.
 
-=== STRUCTURE PER SLIDE ===
-- 2-4 text blocks with substantial explanations (4-6 sentences each)
-- 2-4 images to visualize concepts
-- Optional: 1 quiz, fun_fact, or table if it genuinely helps learning
+✅ GOOD KEYWORDS (specific, searchable):
+- "solar panel" (not "renewable energy concept")
+- "python snake" (not "programming language")
+- "DNA helix" (not "genetics illustration")
+- "factory assembly" (not "manufacturing process")
+- "brain scan" (not "thinking concept")
+- "coffee beans" (not "morning routine")
+- "circuit board" (not "technology background")
 
-=== IMAGE POSITIONS ===
-- "hero": Centered single image, standalone section
-- "intro": Left-aligned image with text flowing beside it on right
-- "grid": 2-3 images side by side (for galleries/comparisons)
+❌ BAD KEYWORDS (abstract, unsearchable):
+- "AI concept", "digital transformation", "learning journey"
+- "success mindset", "growth illustration", "innovation idea"
+- Any word ending in: concept, illustration, abstract, background
 
-=== CRITICAL IMAGE PLACEMENT RULES ===
-Images can ONLY appear in two places:
+RULE: If you can't photograph it in real life, don't use it as a keyword.
 
-1. AT THE START of a slide:
-   - Either "hero" (single centered image, no text beside it)
-   - OR "intro" (single image on left, with the FIRST text paragraph flowing beside it on right)
+=== SLIDE STRUCTURE (${totalSlides} SLIDES TOTAL) ===
 
-2. IN THE MIDDLE between text blocks:
-   - Single image ("hero") or grid of images - but MUST have text paragraphs BEFORE and AFTER
+**SLIDE 1: "${moduleTitle}" (MODULE INTRO)**
+A welcoming introduction slide with:
+- One hero image representing the module topic
+- Text explaining what this module will cover
+- Why it matters and what the learner will gain
 
-NEVER put images at the END of a slide. Every slide MUST end with a text block.
+**SLIDES 2-${slideTitles.length + 1}: CONTENT SLIDES**
+${slidesList}
+Each content slide should have:
+- 2-4 text blocks with educational content
+- 1-2 images with position "hero" or "intro"
+- Optional: 1 fun_fact, quiz, or table per 2 slides
 
-Correct structure examples:
-✓ [hero image] → [text] → [text]
-✓ [intro image + text] → [text] → [hero image] → [text]
-✓ [text] → [grid images] → [text]
-✗ [text] → [hero image] (WRONG - ends with image)
-✗ [grid image] → [text] (WRONG - grid at start)
+**SLIDE ${slideTitles.length + 2}: "Notes & Summary"**
+Single block: notes_summary with summary paragraph + 6-10 bullet points
 
-=== IMAGE KEYWORDS (CRITICAL) ===
-Keywords are for searching Wikimedia. Keep to MAX 5 WORDS.
-Add "diagram", "graph", "map" at end when appropriate.
-
-GOOD: "cell membrane diagram", "classroom students", "neural network graph"
-BAD: "a detailed scientific diagram showing the structure" (too long!)
+**SLIDE ${slideTitles.length + 3}: "Module Exercise"**
+8-12 interactive questions using this MIX:
+- 2-3 quiz blocks (MCQ - follow exact schema above!)
+- 1-2 match_following blocks (follow exact schema above!)
+- 2-3 fill_blank or short_answer blocks
+- 1 reflection block
 
 === OUTPUT FORMAT ===
 {
   "slides": [
     {
-      "title": "Slide Title",
+      "title": "${moduleTitle}",
       "blocks": [
-        {"type": "image", "keywords": "visual concept", "caption": "...", "position": "hero"},
-        {"type": "text", "content": "Detailed explanation that teaches..."},
-        {"type": "text", "content": "Building on the previous point..."}
+        {"type": "image", "keywords": "specific subject", "caption": "...", "position": "hero"},
+        {"type": "text", "content": "Welcome to this module..."},
+        {"type": "text", "content": "In this module, you will learn..."}
+      ]
+    },
+    {
+      "title": "Content Slide Title",
+      "blocks": [
+        {"type": "text", "content": "Educational content..."},
+        {"type": "image", "keywords": "real object", "caption": "...", "position": "hero"},
+        {"type": "text", "content": "More explanation..."},
+        {"type": "fun_fact", "fact": "Did you know..."}
+      ]
+    },
+    {
+      "title": "Notes & Summary",
+      "blocks": [
+        {"type": "notes_summary", "summary": "This module covered...", "points": ["Key point 1", "Key point 2", "Key point 3"]}
+      ]
+    },
+    {
+      "title": "Module Exercise",
+      "blocks": [
+        {"type": "quiz", "question": "...", "options": [{"text": "A", "isCorrect": false}, {"text": "B", "isCorrect": true}, {"text": "C", "isCorrect": false}, {"text": "D", "isCorrect": false}], "explanation": "..."},
+        {"type": "match_following", "pairs": [{"left": "Term1", "right": "Def1"}, {"left": "Term2", "right": "Def2"}, {"left": "Term3", "right": "Def3"}]},
+        {"type": "fill_blank", "sentence": "The ___ is...", "answer": "...", "explanation": "..."}
       ]
     }
   ]
 }
 
-Generate ${slideTitles.length} comprehensive slides. Return ONLY valid JSON.`;
+Generate exactly ${totalSlides} slides. Return ONLY valid JSON.`;
 
   return withRetry(async () => {
     const response = await ai.models.generateContent({
-      model: MODEL,
+      model: MODELS.CONTENT,
       contents: prompt,
-      config: {}
+      config: {
+        thinkingConfig: { thinkingBudget: 0 }
+      }
     });
 
     if (!response.text) throw new Error("No content generated");
@@ -888,8 +1108,8 @@ Generate ${slideTitles.length} comprehensive slides. Return ONLY valid JSON.`;
     // If no callback provided, process images synchronously (blocking mode)
     if (!onImageReady) {
       for (const imgBlock of imageBlocks) {
-        const candidates = await fetchImageCandidates(imgBlock.keywords, 5);
-        const imageUrl = await selectBestImage(candidates, imgBlock.slideTitle, imgBlock.slideContext, imgBlock.keywords);
+        // selectBestImage now handles tiered Wikimedia→Pixabay fetching internally
+        const imageUrl = await selectBestImage(imgBlock.slideTitle, imgBlock.slideContext, imgBlock.keywords);
 
         // Update the block in processedSlides
         const slide = processedSlides[imgBlock.slideIdx];
@@ -903,8 +1123,8 @@ Generate ${slideTitles.length} comprehensive slides. Return ONLY valid JSON.`;
       (async () => {
         for (const imgBlock of imageBlocks) {
           try {
-            const candidates = await fetchImageCandidates(imgBlock.keywords, 5);
-            const imageUrl = await selectBestImage(candidates, imgBlock.slideTitle, imgBlock.slideContext, imgBlock.keywords);
+            // selectBestImage now handles tiered Wikimedia→Pixabay fetching internally
+            const imageUrl = await selectBestImage(imgBlock.slideTitle, imgBlock.slideContext, imgBlock.keywords);
 
             // Notify caller that image is ready
             onImageReady(imgBlock.slideIdx, imgBlock.blockIdx, imageUrl);
@@ -929,7 +1149,7 @@ export async function generateSpeech(text: string): Promise<string> {
   const cleanText = text.slice(0, 2000).replace(/[#*_`]/g, '');
 
   const response = await ai.models.generateContent({
-    model: SPEECH_MODEL,
+    model: MODELS.TTS,
     contents: [{ parts: [{ text: cleanText }] }],
     config: {
       responseModalities: ["AUDIO"],
@@ -960,7 +1180,7 @@ export async function generateConsultantReply(
 
   // Check if user is confirming curriculum generation
   const lowerMessage = message.toLowerCase();
-  const confirmationPhrases = ['yes', 'sure', 'go ahead', 'generate', 'create it', 'create the', 'okay', 'ok', 'yep', 'yeah', 'let\'s go', 'do it', 'sounds good', 'perfect', 'ready', 'go for it', 'make it', 'start'];
+  const confirmationPhrases = ['yes', 'sure', 'go ahead', 'generate', 'create it', 'create the', 'okay', 'ok', 'yep', 'yeah', 'let\'s go', 'do it', 'sounds good', 'perfect', 'ready', 'go for it', 'make it', 'start', 'yo', 'cool'];
   const isConfirmation = confirmationPhrases.some(phrase => lowerMessage.includes(phrase));
 
   // If we previously asked for permission and user confirms
@@ -977,53 +1197,35 @@ export async function generateConsultantReply(
     };
   }
 
-  // Comprehensive system prompt that defines the consultant's role and behavior
-  const systemPrompt = `You are a learning consultant for OmniLearn, an AI-powered educational platform. Your role is to understand what the user wants to learn and gather enough context to create a personalized curriculum for them.
+  // Simple, natural consultant prompt
+  const systemPrompt = `You are a professional learning and curicculum consultant. Help the user figure out what they want to learn.
 
-=== YOUR PERSONALITY ===
-- Direct and thoughtful, not overly enthusiastic or fake
-- Speak like a knowledgeable colleague, not a cheerleader or salesperson
-- Brief and purposeful - don't ramble or over-explain
-- Curious but not intrusive
+=== HOW TO TALK ===
+- Talk normally, like a helpful friend
+- Keep it brief (1-3 sentences usually)
+- Don't be over-enthusiastic or theatrical
+- If they're vague, ask one simple question to clarify
+- If you have enough info, offer to create their curriculum
 
-=== CONVERSATION FLOW ===
 ${isInitialMessage ? `
-This is the START of the conversation. The user wants to learn about: "${message}"
-
-Your job in this first message:
-1. Acknowledge their topic briefly (no excessive praise)
-2. Ask ONE focused question to understand their goal or context
-
-Good example: "Got it. What's driving your interest - is this for work, a project, or general curiosity?"
-Bad example: "Wow, that's such an exciting topic! I'd love to help you on this amazing learning journey!"
+User said: "${message}"
+Respond naturally. You might ask what aspect interests them, or what they're hoping to do with this knowledge.
 ` : turnCount < 6 ? `
-You're in the MIDDLE of gathering context. Based on what the user just said:
-1. If you have a follow-up question, ask it directly
-2. If you have enough information (know their goal + context), move to the confirmation step
-
-Don't drag out the conversation unnecessarily. 2-3 exchanges is usually enough.
+Continue the conversation. When you understand roughly what they want, offer to generate their curriculum.
+Don't interrogate - one question at a time, and only if needed.
 ` : `
-You should have enough context by now. Summarize what you understand and ask for permission to generate.
-
-Example: "So you're looking to learn X for Y purpose, focusing on Z. Shall I create your curriculum?"
+You've chatted enough. Summarize and offer to create the curriculum.
 `}
 
-=== TRIGGERING CURRICULUM GENERATION ===
-When you have gathered sufficient context (typically after 2-3 exchanges), you MUST:
-1. Briefly summarize your understanding of what they want
-2. Ask explicit permission to generate the curriculum
+=== WHEN READY ===
+When offering to generate, use phrases like:
+- "Shall I put together a curriculum for you?"
+- "Want me to create your learning path?"
+- "Ready to generate it?"
 
-Use phrases like:
-- "Shall I create your curriculum now?"
-- "Want me to generate a learning path for this?"
-- "Ready to generate your curriculum?"
+Keep it natural and conversational.`;
 
-The user will then confirm, and curriculum generation will begin automatically.
 
-=== FORMATTING RULES ===
-- NO asterisks, bullet points, or markdown formatting
-- Keep responses to 1-3 sentences max
-- Be direct - skip filler phrases like "Great question!" or "That's interesting!"`;
 
   const contents = [
     { role: "user", parts: [{ text: systemPrompt }] },
@@ -1032,7 +1234,7 @@ The user will then confirm, and curriculum generation will begin automatically.
   ];
 
   const response = await ai.models.generateContent({
-    model: MODEL,
+    model: MODELS.CONSULTANT,
     contents,
     config: {}
   });
@@ -1059,10 +1261,78 @@ export async function generateChatResponse(
   ];
 
   const response = await ai.models.generateContent({
-    model: CHAT_MODEL,
+    model: MODELS.CHAT,
     contents,
     config: {}
   });
 
   return response.text || "I'm not sure how to answer that.";
+}
+
+// ============================================
+// 5. USER ANSWER EVALUATION
+// ============================================
+
+export interface AnswerEvaluation {
+  isCorrect: boolean;
+  score: number;        // 0-100
+  feedback: string;
+}
+
+/**
+ * Evaluate a user's answer to an open-ended question using AI.
+ * Used for short_answer, reflection, and activity type questions.
+ */
+export async function evaluateUserAnswer(
+  context: string,      // Slide/module context
+  question: string,     // The question asked
+  userAnswer: string,   // User's response
+  expectedAnswer?: string // Expected answer if any
+): Promise<AnswerEvaluation> {
+  const prompt = `Evaluate this student's answer.
+
+CONTEXT: ${context}
+QUESTION: ${question}
+STUDENT'S ANSWER: ${userAnswer}
+${expectedAnswer ? `EXPECTED ANSWER: ${expectedAnswer}` : ''}
+
+=== EVALUATION ===
+Judge the answer on:
+1. Correctness - Is the core understanding right?
+2. Completeness - Did they address the question fully?
+3. Understanding - Do they demonstrate genuine comprehension?
+
+For reflection/open-ended questions, be generous - there's no single right answer.
+For factual questions, be accurate but encouraging.
+
+Respond in JSON:
+{
+  "isCorrect": true/false,
+  "score": 0-100,
+  "feedback": "Brief, constructive feedback (2-3 sentences max)"
+}
+
+Return ONLY valid JSON.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: MODELS.ANSWER_EVAL,
+      contents: prompt,
+      config: {}
+    });
+
+    const data = JSON.parse(cleanJsonResponse(response.text || '{}'));
+    return {
+      isCorrect: data.isCorrect ?? false,
+      score: data.score ?? 0,
+      feedback: data.feedback ?? 'Unable to evaluate your answer.'
+    };
+  } catch (error) {
+    console.error('Answer evaluation failed:', error);
+    return {
+      isCorrect: false,
+      score: 50,
+      feedback: 'Your answer was recorded. Keep exploring this topic!'
+    };
+  }
 }

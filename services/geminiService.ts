@@ -25,6 +25,9 @@ const MODELS = {
 // Toggle TTS generation on/off (set to false to disable TTS and save API calls)
 export const TTS_ENABLED = false;
 
+// Toggle Live Voice chat in Consultant (set to false to hide mic button while unstable)
+export const LIVE_VOICE_ENABLED = true;
+
 
 const ai = new GoogleGenAI({ apiKey: API_KEY });
 

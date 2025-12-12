@@ -8,11 +8,13 @@ import {
   refineCurriculum,
   adjustCurriculum,
   generateTTSForModule,
-  ConsultantResult
+  ConsultantResult,
+  LIVE_VOICE_ENABLED
 } from './services/geminiService';
 import { Icons } from './constants';
 import { SlideView } from './components/SlideView';
 import { ChatWidget } from './components/ChatWidget';
+import { useGeminiLive } from './hooks/useGeminiLive';
 import ScrollingBackground from './components/ScrollingBackground';
 import { CURATED_TOPICS, CuratedTopic } from './data/curatedTopics';
 
@@ -127,6 +129,71 @@ function App() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Voice chat for Learning View - with full slide context
+  const currentSlideForVoice = course?.modules[activeModuleIndex]?.slides[activeSlideIndex];
+  const slideContentForVoice = currentSlideForVoice?.blocks
+    ?.filter((b: any) => ['text', 'fun_fact', 'notes_summary'].includes(b.type))
+    ?.map((b: any) => {
+      if (b.type === 'text') return b.content;
+      if (b.type === 'fun_fact') return `Fun fact: ${b.fact}`;
+      if (b.type === 'notes_summary') return b.summary || b.points?.join('. ');
+      return '';
+    })
+    ?.join('\n\n') || '';
+
+  const learningVoice = useGeminiLive({
+    onMessage: (msg) => {
+      setChatMessages(prev => [...prev, { role: msg.role, text: msg.text, timestamp: Date.now() }]);
+    },
+    initialContext: course ? `[CONTEXT: You are a friendly, enthusiastic AI tutor. The student is learning about "${course.topic}".
+
+CURRENT SLIDE: "${currentSlideForVoice?.title || 'Introduction'}"
+
+SLIDE CONTENT:
+${slideContentForVoice}
+
+YOUR TASK: Start with an engaging, brief greeting that shows excitement about what they're exploring. Something like "Oh cool, you're looking at [topic]! That's fascinating because..." - make them feel curious and engaged. Then be ready to answer any questions they have. Keep all responses conversational and brief since this is voice chat.]` : undefined
+  });
+
+  // Build conversation context for consultant voice
+  const conversationContextForVoice = clarificationMessages
+    .map(m => `${m.role === 'user' ? 'User' : 'Consultant'}: ${m.text}`)
+    .join('\n');
+
+  // Voice chat for Consultant View - with exploration context and trigger detection
+  const consultantVoice = useGeminiLive({
+    onMessage: (msg) => {
+      setClarificationMessages(prev => [...prev, { role: msg.role, text: msg.text, timestamp: Date.now() }]);
+    },
+    onModelResponse: (text) => {
+      // Check if AI suggested creating a curriculum
+      const lowerText = text.toLowerCase();
+      if (lowerText.includes('create') && (lowerText.includes('curriculum') || lowerText.includes('course') || lowerText.includes('learning path'))) {
+        console.log('🎯 Curriculum trigger detected in voice response');
+        // Stop voice chat and trigger curriculum generation
+        consultantVoice.stop();
+        setTimeout(() => {
+          if (!isLoading && clarificationMessages.length >= 2) {
+            handleGenerateFromChat();
+          }
+        }, 1000);
+      }
+    },
+    initialContext: conversationContextForVoice
+      ? `[CONTEXT: You are a friendly learning consultant continuing a conversation about what the user wants to learn.
+
+CONVERSATION SO FAR:
+${conversationContextForVoice}
+
+YOUR TASK: Continue this natural conversation to help the user clarify what they want to learn. When you feel you have enough information, suggest creating a personalized curriculum. Say something like "I can create a curriculum for you now!" Keep responses conversational and brief since this is voice chat.]`
+      : `[CONTEXT: You are a friendly learning consultant. Start by warmly greeting the user and asking what they'd like to learn about today. Ask follow-up questions to understand:
+- What topic interests them
+- Their current knowledge level
+- What they want to achieve
+
+When you feel you have enough information, suggest creating a personalized curriculum. Say something like "I can create a curriculum for you now!" Keep responses conversational and brief since this is voice chat.]`
+  });
+
   const clarificationEndRef = useRef<HTMLDivElement>(null);
   const refinementEndRef = useRef<HTMLDivElement>(null);
   const contentScrollRef = useRef<HTMLDivElement>(null);
@@ -228,6 +295,11 @@ function App() {
           timestamp: Date.now()
         }]);
 
+        // Auto-start voice chat after first response (if enabled)
+        if (LIVE_VOICE_ENABLED && !result.shouldGenerateCurriculum) {
+          setTimeout(() => consultantVoice.start(), 500);
+        }
+
         if (result.shouldGenerateCurriculum) {
           await handleGenerateFromChat(result.curriculumContext);
         }
@@ -301,6 +373,9 @@ function App() {
   };
 
   const handleGenerateFromChat = async (context?: { topic: string; interests?: string[]; knowledgeLevel?: string; goals?: string }) => {
+    // Stop voice chat when generating curriculum
+    consultantVoice.stop();
+
     // Build context string from consultant's extracted info + conversation
     let contextStr = clarificationMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
 
@@ -1060,6 +1135,26 @@ function App() {
               </div>
             ))}
 
+            {/* Live transcription indicator for voice chat */}
+            {consultantVoice.isActive && (consultantVoice.currentUserText || consultantVoice.currentModelText) && (
+              <div className="space-y-2">
+                {consultantVoice.currentUserText && (
+                  <div className="flex justify-end">
+                    <div className="max-w-[80%] p-4 rounded-2xl text-sm bg-zinc-800/50 text-white/70 italic">
+                      {consultantVoice.currentUserText}...
+                    </div>
+                  </div>
+                )}
+                {consultantVoice.currentModelText && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[80%] p-4 rounded-2xl text-sm bg-zinc-950/50 text-zinc-400 border border-zinc-800 italic">
+                      {consultantVoice.currentModelText}...
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Consulting (thinking) indicator */}
             {isConsulting && !isLoading && (
               <div className="flex justify-start">
@@ -1087,17 +1182,63 @@ function App() {
 
           {/* Input - disabled when loading */}
           <div className="p-4 bg-zinc-900/50 border-t border-zinc-800">
-            <input
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-zinc-700 disabled:opacity-50"
-              placeholder={isLoading ? "Generating curriculum..." : "Type your answer..."}
-              disabled={isLoading}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !isLoading) {
-                  handleClarificationSend(e.currentTarget.value);
-                  e.currentTarget.value = '';
-                }
-              }}
-            />
+            {/* Live transcription indicator */}
+            {consultantVoice.isActive && (consultantVoice.currentUserText || consultantVoice.currentModelText) && (
+              <div className="mb-3 p-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm">
+                {consultantVoice.currentUserText && (
+                  <p className="text-zinc-400 italic">You: {consultantVoice.currentUserText}...</p>
+                )}
+                {consultantVoice.currentModelText && (
+                  <p className="text-purple-400 italic">AI: {consultantVoice.currentModelText}...</p>
+                )}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input
+                id="consultant-input"
+                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-zinc-700 disabled:opacity-50"
+                placeholder={isLoading ? "Generating curriculum..." : consultantVoice.isActive ? "Listening..." : "Type your answer..."}
+                disabled={isLoading || consultantVoice.isActive}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !isLoading && !consultantVoice.isActive) {
+                    handleClarificationSend(e.currentTarget.value);
+                    e.currentTarget.value = '';
+                  }
+                }}
+              />
+              {/* Voice chat button - only show if enabled */}
+              {LIVE_VOICE_ENABLED && (
+                <button
+                  onClick={() => consultantVoice.isActive ? consultantVoice.stop() : consultantVoice.start()}
+                  disabled={isLoading}
+                  className={`rounded-xl px-4 py-3 transition-all ${
+                    consultantVoice.isActive
+                      ? consultantVoice.status === 'speaking'
+                        ? 'bg-purple-600 text-white animate-pulse'
+                        : 'bg-red-600 hover:bg-red-700 text-white'
+                      : 'bg-purple-600 hover:bg-purple-700 text-white'
+                  } disabled:opacity-50`}
+                  title={consultantVoice.isActive ? 'Stop voice chat' : 'Start voice chat'}
+                >
+                  {consultantVoice.isActive ? <Icons.Stop /> : <Icons.Mic />}
+                </button>
+              )}
+              {/* Send button */}
+              <button
+                onClick={() => {
+                  const input = document.getElementById('consultant-input') as HTMLInputElement;
+                  if (input?.value.trim() && !isLoading) {
+                    handleClarificationSend(input.value);
+                    input.value = '';
+                  }
+                }}
+                disabled={isLoading || consultantVoice.isActive}
+                className="bg-amber-400 hover:bg-amber-500 text-black rounded-xl px-4 py-3 disabled:opacity-50 transition-colors"
+                title="Send message"
+              >
+                <Icons.ArrowRight />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1523,6 +1664,13 @@ function App() {
             <div className="p-4 border-b border-zinc-900 flex items-center justify-between">
               <h3 className="font-semibold text-zinc-200 flex items-center gap-2">
                 <Icons.MessageCircle /> AI Tutor
+                {learningVoice.isActive && (
+                  <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${
+                    learningVoice.status === 'speaking' ? 'bg-purple-600 animate-pulse' : 'bg-green-600'
+                  }`}>
+                    {learningVoice.status === 'speaking' ? '🔊 Speaking' : '🎤 Listening'}
+                  </span>
+                )}
               </h3>
               <button
                 onClick={() => setShowChatPane(false)}
@@ -1534,7 +1682,7 @@ function App() {
 
             {/* Chat Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {chatMessages.length === 0 && (
+              {chatMessages.length === 0 && !learningVoice.isActive && (
                 <div className="text-center text-zinc-600 text-sm py-8">
                   <p className="mb-2">Hi! I'm here to help.</p>
                   <p>Ask me anything about <span className="text-zinc-400">{currentSlide?.title}</span></p>
@@ -1551,6 +1699,27 @@ function App() {
                   </div>
                 </div>
               ))}
+
+              {/* Live transcription indicator */}
+              {learningVoice.isActive && (learningVoice.currentUserText || learningVoice.currentModelText) && (
+                <div className="space-y-2">
+                  {learningVoice.currentUserText && (
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] rounded-2xl p-3 text-sm bg-amber-400/50 text-black/70 italic">
+                        {learningVoice.currentUserText}...
+                      </div>
+                    </div>
+                  )}
+                  {learningVoice.currentModelText && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[85%] rounded-2xl p-3 text-sm bg-zinc-900/50 text-zinc-400 border border-zinc-800 italic">
+                        {learningVoice.currentModelText}...
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {isChatLoading && (
                 <div className="flex justify-start">
                   <div className="bg-zinc-900 border border-zinc-800 p-3 rounded-2xl text-zinc-500 text-sm animate-pulse">
@@ -1565,7 +1734,7 @@ function App() {
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (!chatInput.trim() || isChatLoading) return;
+                if (!chatInput.trim() || isChatLoading || learningVoice.isActive) return;
 
                 const userMsg: ChatMessage = { role: 'user', text: chatInput, timestamp: Date.now() };
                 setChatMessages(prev => [...prev, userMsg]);
@@ -1591,12 +1760,30 @@ function App() {
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
-                  placeholder="Ask a question..."
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 transition-colors"
+                  placeholder={learningVoice.isActive ? "Listening..." : "Ask a question..."}
+                  disabled={learningVoice.isActive}
+                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500 transition-colors disabled:opacity-50"
                 />
+                {/* Voice button */}
+                <button
+                  type="button"
+                  onClick={() => learningVoice.isActive ? learningVoice.stop() : learningVoice.start()}
+                  disabled={isChatLoading}
+                  className={`rounded-xl px-3 py-2 transition-all ${
+                    learningVoice.isActive
+                      ? learningVoice.status === 'speaking'
+                        ? 'bg-purple-600 text-white animate-pulse'
+                        : 'bg-red-600 hover:bg-red-700 text-white'
+                      : 'bg-purple-600 hover:bg-purple-700 text-white'
+                  } disabled:opacity-50`}
+                  title={learningVoice.isActive ? 'Stop voice chat' : 'Start voice chat'}
+                >
+                  {learningVoice.isActive ? <Icons.Stop /> : <Icons.Mic />}
+                </button>
+                {/* Send button */}
                 <button
                   type="submit"
-                  disabled={isChatLoading}
+                  disabled={isChatLoading || learningVoice.isActive}
                   className="bg-amber-400 hover:bg-amber-500 text-black rounded-xl px-3 py-2 disabled:opacity-50 transition-colors"
                 >
                   <Icons.ArrowRight />

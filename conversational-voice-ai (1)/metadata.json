@@ -1,0 +1,7 @@
+{
+  "name": "Conversational Voice AI",
+  "description": "Engage in a real-time voice conversation with a friendly AI assistant powered by the Gemini Live API. Speak naturally and hear instant, human-like responses.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

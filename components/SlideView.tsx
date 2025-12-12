@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Slide, ContentBlock, TextBlock as TextBlockType, ImageBlock as ImageBlockType, QuizBlock as QuizBlockType, FunFactBlock as FunFactBlockType, TableBlock as TableBlockType, NotesSummaryBlock as NotesSummaryBlockType, FillBlankBlock as FillBlankBlockType, ShortAnswerBlock as ShortAnswerBlockType, ReflectionBlock as ReflectionBlockType, MatchFollowingBlock as MatchFollowingBlockType } from '../types';
 import { Icons } from '../constants';
 import { generateSpeech } from '../services/geminiService';
@@ -33,10 +33,8 @@ const TextBlock: React.FC<{ block: TextBlockType }> = ({ block }) => {
 };
 
 // ============================================
-// IMAGE BLOCK (Clean Layout System)
-// Positions: hero (centered), intro (left at start), grid (row of images)
-// Using object-contain to show full images without clipping
-// Supports loading state when imageUrl is null
+// IMAGE BLOCK (Clean, Immersive Design)
+// No heavy borders or dark backgrounds - images stand on their own
 // ============================================
 const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
   const [imgError, setImgError] = useState(false);
@@ -45,40 +43,29 @@ const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
 
   const placeholderUrl = `https://placehold.co/800x450/27272a/71717a?text=${encodeURIComponent(keywords?.slice(0, 15) || 'Image')}`;
 
-  // null = loading in background, undefined/error = use placeholder
   const isLoading = imageUrl === null;
   const src = imgError ? placeholderUrl : (imageUrl || placeholderUrl);
 
-  // Common image style - object-contain to preserve full image
-  const imgClassName = `w-full h-full object-contain transition-opacity duration-300 ${imgLoaded ? 'opacity-100' : 'opacity-0'}`;
-
-  // Loading skeleton component
+  // Simple loading skeleton
   const LoadingSkeleton = ({ height }: { height: string }) => (
-    <div className={`w-full ${height} bg-zinc-800 rounded-xl animate-pulse flex items-center justify-center`}>
-      <div className="flex flex-col items-center gap-2 text-zinc-600">
-        <svg className="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-        </svg>
-        <span className="text-xs">Loading image...</span>
-      </div>
+    <div className={`w-full ${height} bg-zinc-900 rounded-lg animate-pulse flex items-center justify-center`}>
+      <div className="w-6 h-6 border-2 border-zinc-700 border-t-zinc-500 rounded-full animate-spin" />
     </div>
   );
 
-  // HERO: Centered image, moderate width (not full), standalone section
+  // HERO: Large, centered, no container - image speaks for itself
   if (position === 'hero') {
     return (
-      <div className="w-full max-w-2xl mx-auto my-8">
+      <figure className="w-full max-w-3xl mx-auto my-10">
         {isLoading ? (
-          <LoadingSkeleton height="h-[300px]" />
+          <LoadingSkeleton height="h-[280px]" />
         ) : (
-          <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '200px', maxHeight: '350px' }}>
-            {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+          <div className="relative">
+            {!imgLoaded && <div className="absolute inset-0 bg-zinc-900 rounded-lg animate-pulse" />}
             <img
               src={src}
               alt={caption || keywords || 'Illustration'}
-              className={imgClassName}
-              style={{ maxHeight: '350px' }}
+              className={`w-full h-auto min-h-[200px] max-h-[350px] object-contain rounded-lg transition-opacity duration-500 ${imgLoaded ? 'opacity-100' : 'opacity-0'}`}
               referrerPolicy="no-referrer"
               onLoad={() => setImgLoaded(true)}
               onError={() => setImgError(true)}
@@ -86,26 +73,25 @@ const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
           </div>
         )}
         {caption && (
-          <p className="text-center text-xs text-zinc-500 mt-2 italic">{caption}</p>
+          <figcaption className="text-center text-sm text-zinc-500 mt-4">{caption}</figcaption>
         )}
-      </div>
+      </figure>
     );
   }
 
-  // INTRO: Left-aligned image (for slide start), smaller size
+  // INTRO: Left-aligned, floating beside text
   if (position === 'intro') {
     return (
-      <div className="float-left mr-6 mb-4 w-[35%] max-w-xs">
+      <figure className="float-left mr-8 mb-6 w-[40%] max-w-sm">
         {isLoading ? (
-          <LoadingSkeleton height="h-[200px]" />
+          <LoadingSkeleton height="h-[180px]" />
         ) : (
-          <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '150px', maxHeight: '250px' }}>
-            {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+          <div className="relative">
+            {!imgLoaded && <div className="absolute inset-0 bg-zinc-900 rounded-lg animate-pulse" />}
             <img
               src={src}
               alt={caption || keywords || 'Illustration'}
-              className={imgClassName}
-              style={{ maxHeight: '250px' }}
+              className={`w-full h-auto min-h-[200px] max-h-[280px] object-contain rounded-lg transition-opacity duration-500 ${imgLoaded ? 'opacity-100' : 'opacity-0'}`}
               referrerPolicy="no-referrer"
               onLoad={() => setImgLoaded(true)}
               onError={() => setImgError(true)}
@@ -113,25 +99,24 @@ const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
           </div>
         )}
         {caption && (
-          <p className="text-center text-xs text-zinc-500 mt-2 italic">{caption}</p>
+          <figcaption className="text-center text-xs text-zinc-500 mt-2">{caption}</figcaption>
         )}
-      </div>
+      </figure>
     );
   }
 
-  // GRID: Inline images for galleries (multiple images in a row)
+  // GRID: For image galleries
   return (
-    <div className="inline-block w-[32%] mx-[0.5%] mb-4 align-top">
+    <figure className="inline-block w-[32%] mx-[0.5%] mb-6 align-top">
       {isLoading ? (
-        <LoadingSkeleton height="h-[160px]" />
+        <LoadingSkeleton height="h-[140px]" />
       ) : (
-        <div className="bg-zinc-900/50 rounded-xl overflow-hidden border border-zinc-800 shadow-lg flex items-center justify-center relative" style={{ minHeight: '120px', maxHeight: '200px' }}>
-          {!imgLoaded && <div className="absolute inset-0 bg-zinc-800 animate-pulse" />}
+        <div className="relative">
+          {!imgLoaded && <div className="absolute inset-0 bg-zinc-900 rounded-lg animate-pulse" />}
           <img
             src={src}
             alt={caption || keywords || 'Illustration'}
-            className={imgClassName}
-            style={{ maxHeight: '200px' }}
+            className={`w-full h-auto min-h-[200px] max-h-[200px] object-contain rounded-lg transition-opacity duration-500 ${imgLoaded ? 'opacity-100' : 'opacity-0'}`}
             referrerPolicy="no-referrer"
             onLoad={() => setImgLoaded(true)}
             onError={() => setImgError(true)}
@@ -139,27 +124,23 @@ const ImageBlock: React.FC<{ block: ImageBlockType }> = ({ block }) => {
         </div>
       )}
       {caption && (
-        <p className="text-center text-xs text-zinc-500 mt-1 italic">{caption}</p>
+        <figcaption className="text-center text-xs text-zinc-500 mt-2">{caption}</figcaption>
       )}
-    </div>
+    </figure>
   );
 };
 
 // ============================================
-// QUIZ BLOCK
+// QUIZ BLOCK (Clean, minimal design)
 // ============================================
 const QuizBlock: React.FC<{ block: QuizBlockType }> = ({ block }) => {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [showExplanation, setShowExplanation] = useState(false);
 
-  // Show placeholder if question or options are missing
   if (!block.question || !block.options || block.options.length === 0) {
     return (
-      <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 my-4">
-        <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-2 flex items-center gap-2">
-          <Icons.CheckCircle /> Quiz
-        </h4>
-        <p className="text-zinc-500 italic">Quiz content is loading or unavailable...</p>
+      <div className="my-8 py-6 border-t border-zinc-800">
+        <p className="text-zinc-500 italic">Quiz loading...</p>
       </div>
     );
   }
@@ -170,21 +151,19 @@ const QuizBlock: React.FC<{ block: QuizBlockType }> = ({ block }) => {
   };
 
   return (
-    <div className="bg-zinc-900 rounded-2xl p-8 border border-zinc-800 my-8 clear-both">
-      <h3 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-6 flex items-center gap-2">
-        <Icons.CheckCircle /> Quick Check
-      </h3>
-      <p className="text-xl font-medium mb-6 text-white">{block.question}</p>
+    <div className="my-10 py-8 border-t border-zinc-800 clear-both">
+      <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-4">Quick Check</p>
+      <p className="text-xl font-medium mb-6 text-white leading-relaxed">{block.question}</p>
       <div className="space-y-3">
         {block.options.map((option, idx) => {
           const isSelected = selectedIndex === idx;
           const isCorrect = option.isCorrect;
 
-          let btnClass = 'bg-zinc-950 border-zinc-800 hover:border-zinc-600 hover:bg-zinc-900 text-zinc-300';
+          let btnClass = 'border-zinc-800 hover:border-zinc-600 text-zinc-300 hover:text-white';
           if (showExplanation) {
-            if (isCorrect) btnClass = 'bg-emerald-900/20 border-emerald-700 text-emerald-200';
-            else if (isSelected) btnClass = 'bg-red-900/20 border-red-700 text-red-200';
-            else btnClass = 'bg-zinc-900/50 border-zinc-800 text-zinc-500';
+            if (isCorrect) btnClass = 'border-emerald-600 text-emerald-300 bg-emerald-900/10';
+            else if (isSelected) btnClass = 'border-red-600 text-red-300 bg-red-900/10';
+            else btnClass = 'border-zinc-800 text-zinc-600';
           }
 
           return (
@@ -192,41 +171,35 @@ const QuizBlock: React.FC<{ block: QuizBlockType }> = ({ block }) => {
               key={idx}
               onClick={() => handleSelect(idx)}
               disabled={showExplanation}
-              className={`w-full text-left p-4 rounded-xl border transition-all flex justify-between items-center ${btnClass}`}
+              className={`w-full text-left p-4 rounded-lg border transition-all flex justify-between items-center ${btnClass}`}
             >
-              {option.text}
-              {showExplanation && isCorrect && <span className="text-emerald-400 text-sm">✓ Correct</span>}
-              {showExplanation && isSelected && !isCorrect && <span className="text-red-400 text-sm">✗ Incorrect</span>}
+              <span>{option.text}</span>
+              {showExplanation && isCorrect && <span className="text-emerald-400 text-sm">✓</span>}
+              {showExplanation && isSelected && !isCorrect && <span className="text-red-400 text-sm">✗</span>}
             </button>
           );
         })}
       </div>
       {showExplanation && block.explanation && (
-        <div className="mt-6 p-5 bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-300 text-sm leading-relaxed">
-          <strong className="text-white block mb-1">Explanation</strong>
+        <p className="mt-6 text-zinc-400 text-sm leading-relaxed border-l-2 border-zinc-700 pl-4">
           {block.explanation}
-        </div>
+        </p>
       )}
     </div>
   );
 };
 
 // ============================================
-// FUN FACT BLOCK
+// FUN FACT BLOCK (Minimal callout)
 // ============================================
 const FunFactBlock: React.FC<{ block: FunFactBlockType }> = ({ block }) => {
   if (!block.fact) return null;
 
   return (
-    <div className="bg-zinc-900/50 border-l-4 border-amber-400 p-6 rounded-r-lg my-6 clear-both">
-      <div className="flex items-start gap-4">
-        <div className="text-amber-400 mt-1 flex-shrink-0"><Icons.Sparkles /></div>
-        <div>
-          <h4 className="font-bold text-zinc-200 mb-1">Did You Know?</h4>
-          <p className="text-zinc-400">{block.fact}</p>
-        </div>
-      </div>
-    </div>
+    <aside className="my-8 py-4 border-l-2 border-amber-400/60 pl-6 clear-both">
+      <p className="text-xs font-medium text-amber-400/80 uppercase tracking-wide mb-2">Did you know?</p>
+      <p className="text-zinc-300 leading-relaxed">{block.fact}</p>
+    </aside>
   );
 };
 
@@ -269,30 +242,30 @@ const TableBlock: React.FC<{ block: TableBlockType }> = ({ block }) => {
 };
 
 // ============================================
-// NOTES & SUMMARY BLOCK
+// NOTES & SUMMARY BLOCK (Clean design)
 // ============================================
 const NotesSummaryBlock: React.FC<{ block: NotesSummaryBlockType }> = ({ block }) => {
   if (!block.points || block.points.length === 0) return null;
 
   return (
-    <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 rounded-2xl p-8 border border-zinc-800 my-8">
-      <h3 className="text-xl font-bold text-white mb-4 flex items-center gap-3">
+    <section className="my-10 py-8 border-t border-zinc-800">
+      <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-3">
         <Icons.BookOpen /> Key Takeaways
       </h3>
       {block.summary && (
-        <p className="text-zinc-300 mb-6 leading-relaxed border-l-2 border-amber-400 pl-4 italic">
+        <p className="text-zinc-400 mb-6 leading-relaxed border-l-2 border-zinc-700 pl-4">
           {block.summary}
         </p>
       )}
       <ul className="space-y-3">
         {block.points.map((point, idx) => (
           <li key={idx} className="flex items-start gap-3 text-zinc-300">
-            <span className="text-emerald-400 font-bold mt-0.5">•</span>
+            <span className="text-emerald-400 mt-1">•</span>
             <span>{point}</span>
           </li>
         ))}
       </ul>
-    </div>
+    </section>
   );
 };
 
@@ -493,6 +466,25 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+
+  // Use pre-generated audio URL if available
+  const preGeneratedAudio = slide.audioUrl;
+
+  // Reset audio state when slide changes
+  useEffect(() => {
+    // Stop any playing audio
+    if (audioSourceRef.current) {
+      try { audioSourceRef.current.stop(); } catch (e) {}
+      audioSourceRef.current = null;
+    }
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current = null;
+    }
+    setIsPlaying(false);
+    setAudioBase64(null);
+  }, [slide.id]);
 
   const getTextForSpeech = () => {
     return slide.blocks
@@ -534,9 +526,28 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
 
   const toggleAudio = async () => {
     if (isPlaying) {
+      // Stop any playing audio
       stopAudio();
+      if (audioElementRef.current) {
+        audioElementRef.current.pause();
+        audioElementRef.current.currentTime = 0;
+      }
     } else {
-      if (!audioBase64) {
+      // Use pre-generated audio if available
+      if (preGeneratedAudio) {
+        try {
+          if (!audioElementRef.current) {
+            audioElementRef.current = new Audio(preGeneratedAudio);
+            audioElementRef.current.onended = () => setIsPlaying(false);
+          }
+          audioElementRef.current.currentTime = 0;
+          await audioElementRef.current.play();
+          setIsPlaying(true);
+        } catch (error) {
+          console.error("Pre-generated audio playback error", error);
+        }
+      } else if (!audioBase64) {
+        // Fallback to on-demand TTS generation
         setAudioLoading(true);
         try {
           const text = getTextForSpeech();
@@ -558,19 +569,19 @@ export const SlideView: React.FC<SlideViewProps> = ({ slide }) => {
   const validBlocks = slide.blocks.filter(block => block && block.type);
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto pr-2 pb-32">
-      {/* Header */}
-      <div className="flex justify-between items-start mb-8 border-b border-zinc-900 pb-6">
-        <h1 className="text-3xl font-bold text-white tracking-tight">{slide.title}</h1>
+    <div className="flex flex-col h-full overflow-y-auto pb-24">
+      {/* Header - Clean, minimal */}
+      <div className="flex justify-between items-center mb-10">
+        <h1 className="text-3xl md:text-4xl font-bold text-white tracking-tight leading-tight">{slide.title}</h1>
         <button
           onClick={toggleAudio}
           disabled={audioLoading}
-          className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-900 hover:bg-zinc-800 text-zinc-100 border border-zinc-800 transition-colors disabled:opacity-50"
+          className="flex items-center gap-2 px-3 py-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-900 transition-colors disabled:opacity-50"
         >
           {audioLoading ? (
-            <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span>
+            <span className="w-5 h-5 border-2 border-zinc-500 border-t-white rounded-full animate-spin" />
           ) : isPlaying ? <Icons.Pause /> : <Icons.Play />}
-          <span className="text-sm font-medium">{isPlaying ? 'Pause' : 'Listen'}</span>
+          <span className="text-sm hidden sm:inline">{isPlaying ? 'Pause' : 'Listen'}</span>
         </button>
       </div>
 

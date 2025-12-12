@@ -7,12 +7,82 @@ import {
   generateChatResponse,
   refineCurriculum,
   adjustCurriculum,
+  generateTTSForModule,
   ConsultantResult
 } from './services/geminiService';
 import { Icons } from './constants';
 import { SlideView } from './components/SlideView';
 import { ChatWidget } from './components/ChatWidget';
 import ScrollingBackground from './components/ScrollingBackground';
+import { CURATED_TOPICS, CuratedTopic } from './data/curatedTopics';
+
+// Curated Topic Card Component with Wikimedia API image loading
+const CuratedTopicCard: React.FC<{ topic: CuratedTopic; onClick: () => void }> = ({ topic, onClick }) => {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchImage = async () => {
+      try {
+        const params = new URLSearchParams({
+          origin: '*',
+          action: 'query',
+          generator: 'search',
+          gsrsearch: `${topic.imageKeyword} filetype:bitmap`,
+          gsrnamespace: '6',
+          gsrlimit: '1',
+          prop: 'imageinfo',
+          iiprop: 'url',
+          iiurlwidth: '400',
+          format: 'json'
+        });
+
+        const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`);
+        const data = await res.json();
+
+        if (data.query?.pages) {
+          const pages = Object.values(data.query.pages) as any[];
+          const info = pages[0]?.imageinfo?.[0];
+          if (info?.thumburl || info?.url) {
+            setImageUrl(info.thumburl || info.url);
+          }
+        }
+      } catch {
+        // Use placeholder on error
+      }
+    };
+
+    fetchImage();
+  }, [topic.imageKeyword]);
+
+  const placeholderUrl = `https://placehold.co/400x300/27272a/71717a?text=${encodeURIComponent(topic.title.slice(0, 15))}`;
+
+  return (
+    <button
+      onClick={onClick}
+      className="group text-left bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-600 rounded-2xl overflow-hidden transition-all duration-300 hover:scale-[1.02] hover:shadow-xl"
+    >
+      <div className="aspect-[4/3] relative overflow-hidden bg-zinc-800">
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt={topic.title}
+            className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700"
+            onError={(e) => { (e.target as HTMLImageElement).src = placeholderUrl; }}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <div className="w-8 h-8 border-2 border-zinc-600 border-t-zinc-400 rounded-full animate-spin" />
+          </div>
+        )}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
+      </div>
+      <div className="p-5">
+        <h4 className="font-bold text-white text-base mb-2 group-hover:text-amber-400 transition-colors">{topic.title}</h4>
+        <p className="text-zinc-500 text-sm leading-relaxed">{topic.tagline}</p>
+      </div>
+    </button>
+  );
+};
 
 function App() {
   // View state
@@ -23,6 +93,9 @@ function App() {
   const [isChatMode, setIsChatMode] = useState(true);
   const [clarificationMessages, setClarificationMessages] = useState<ChatMessage[]>([]);
   const [isConsulting, setIsConsulting] = useState(false);
+
+  // Save custom instructions for future queries (default unchecked)
+  const [saveCustomInstructions, setSaveCustomInstructions] = useState(false);
 
   // Curriculum state (new - for two-phase flow)
   const [curriculum, setCurriculum] = useState<CurriculumData | null>(null);
@@ -56,6 +129,7 @@ function App() {
 
   const clarificationEndRef = useRef<HTMLDivElement>(null);
   const refinementEndRef = useRef<HTMLDivElement>(null);
+  const contentScrollRef = useRef<HTMLDivElement>(null);
 
   // Learning preferences state
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -82,6 +156,25 @@ function App() {
       catch (e) { console.error("Failed to parse preferences", e); }
     }
   }, []);
+
+  // Scroll to top when view, module, or slide changes
+  useEffect(() => {
+    // Scroll both window and content container to top
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    if (contentScrollRef.current) {
+      contentScrollRef.current.scrollTop = 0;
+    }
+  }, [view, activeModuleIndex, activeSlideIndex]);
+
+  // On-demand TTS generation when switching modules
+  useEffect(() => {
+    if (course && view === 'LEARNING') {
+      const module = course.modules[activeModuleIndex];
+      if (module && module.isLoaded && !module.ttsGenerated) {
+        generateModuleTTS(course, activeModuleIndex);
+      }
+    }
+  }, [activeModuleIndex, course, view]);
 
   // Save preferences when changed
   const updatePreferences = (newPrefs: Partial<LearningPreferences>) => {
@@ -125,11 +218,18 @@ function App() {
       setIsConsulting(true);
 
       try {
+        // Note: Not using streaming for JSON responses - would show raw JSON
         const result = await generateConsultantReply([], topic, true);
-        setClarificationMessages(prev => [...prev, { role: 'model', text: result.text, timestamp: Date.now() }]);
+
+        // Add AI response
+        setClarificationMessages(prev => [...prev, {
+          role: 'model',
+          text: result.text,
+          timestamp: Date.now()
+        }]);
 
         if (result.shouldGenerateCurriculum) {
-          await handleGenerateFromChat();
+          await handleGenerateFromChat(result.curriculumContext);
         }
       } catch (e) { console.error(e); }
       finally { setIsConsulting(false); }
@@ -149,16 +249,21 @@ function App() {
         role: m.role,
         parts: [{ text: m.text }]
       }));
+
+      // Note: Not using streaming for JSON responses
       const result = await generateConsultantReply(apiHistory, text, false);
 
-      // Show the AI's response
-      setClarificationMessages(prev => [...prev, { role: 'model', text: result.text, timestamp: Date.now() }]);
+      // Add AI response
+      setClarificationMessages(prev => [...prev, {
+        role: 'model',
+        text: result.text,
+        timestamp: Date.now()
+      }]);
 
       // If AI confirms we should generate, do it now
       if (result.shouldGenerateCurriculum) {
-        setIsConsulting(false); // Stop typing indicator
-        // Show generating status in UI
-        await handleGenerateFromChat();
+        setIsConsulting(false);
+        await handleGenerateFromChat(result.curriculumContext);
       }
     } catch (e) { console.error(e); }
     finally { setIsConsulting(false); }
@@ -182,6 +287,11 @@ function App() {
       setCurriculum(curriculumData);
       setRefinementMessages([]);
       setView('CURRICULUM_REVIEW');
+
+      // Clear custom instructions after generation if not saving
+      if (!saveCustomInstructions) {
+        updatePreferences({ customInstructions: '' });
+      }
     } catch (error) {
       console.error(error);
       alert("Failed to generate curriculum. Please try again.");
@@ -190,9 +300,22 @@ function App() {
     }
   };
 
-  const handleGenerateFromChat = async () => {
-    const context = clarificationMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
-    await handleGenerateCurriculumOnly(topic, context);
+  const handleGenerateFromChat = async (context?: { topic: string; interests?: string[]; knowledgeLevel?: string; goals?: string }) => {
+    // Build context string from consultant's extracted info + conversation
+    let contextStr = clarificationMessages.map(m => `${m.role.toUpperCase()}: ${m.text}`).join('\n');
+
+    if (context) {
+      const structuredContext = [
+        `TOPIC: ${context.topic || topic}`,
+        context.interests?.length ? `INTERESTS: ${context.interests.join(', ')}` : '',
+        context.knowledgeLevel ? `LEVEL: ${context.knowledgeLevel}` : '',
+        context.goals ? `GOALS: ${context.goals}` : ''
+      ].filter(Boolean).join('\n');
+
+      contextStr = structuredContext + '\n\n--- CONVERSATION ---\n' + contextStr;
+    }
+
+    await handleGenerateCurriculumOnly(context?.topic || topic, contextStr);
   };
 
   // ============================================
@@ -243,6 +366,42 @@ function App() {
       alert("Failed to adjust curriculum. Please try again.");
     }
     finally { setIsRefiningCurriculum(false); }
+  };
+
+  // ============================================
+  // TTS GENERATION (Background Audio)
+  // ============================================
+
+  const generateModuleTTS = async (courseData: Course, moduleIndex: number) => {
+    const module = courseData.modules[moduleIndex];
+    if (!module || module.ttsGenerated || !module.isLoaded) return;
+
+    console.log(`🔊 Starting TTS generation for Module ${moduleIndex + 1}: ${module.title}`);
+
+    try {
+      const audioUrls = await generateTTSForModule(module.slides);
+
+      // Update course with audio URLs
+      setCourse(prevCourse => {
+        if (!prevCourse) return prevCourse;
+
+        const updatedModules = prevCourse.modules.map((m, idx) => {
+          if (idx !== moduleIndex) return m;
+
+          const updatedSlides = m.slides.map((slide, sIdx) => ({
+            ...slide,
+            audioUrl: audioUrls[sIdx] || undefined
+          }));
+
+          return { ...m, slides: updatedSlides, ttsGenerated: true };
+        });
+
+        return { ...prevCourse, modules: updatedModules };
+      });
+
+    } catch (error) {
+      console.error(`TTS generation failed for module ${moduleIndex}:`, error);
+    }
   };
 
   // ============================================
@@ -348,6 +507,9 @@ function App() {
 
       // Generate remaining modules in background
       generateRemainingModules(updatedCourse, 1);
+
+      // Generate TTS for Module 1 in background (don't await)
+      generateModuleTTS(updatedCourse, 0);
 
     } catch (error) {
       console.error(error);
@@ -626,7 +788,7 @@ function App() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <span className="text-zinc-300 text-sm font-medium group-hover:text-white transition-colors line-clamp-2">
-                          {item.topic}
+                          {item.title || item.topic}
                         </span>
                         <button
                           onClick={(e) => deleteFromHistory(item.id, e)}
@@ -647,12 +809,14 @@ function App() {
           )}
         </div>
 
-        {/* Main Content Area */}
-        <div className="flex-1 flex flex-col items-center justify-center p-6 relative overflow-hidden">
-          {/* Animated Scrolling Image Background */}
-          <ScrollingBackground />
+        {/* Main Content Area - Scrollable */}
+        <div className="flex-1 overflow-y-auto">
+          {/* Hero Section with Scrolling Background - Fixed Height */}
+          <div className="relative min-h-[80vh] flex flex-col items-center justify-center p-6 overflow-hidden">
+            {/* Animated Scrolling Image Background - contained to hero */}
+            <ScrollingBackground />
 
-          <div className="z-10 max-w-xl w-full text-center space-y-8 animate-fade-in-up">
+            <div className="z-10 max-w-xl w-full text-center space-y-8 animate-fade-in-up">
             {/* Mobile Logo */}
             <div className="md:hidden flex justify-center mb-4">
               <div className="flex items-center gap-3">
@@ -674,20 +838,22 @@ function App() {
             </div>
 
             {/* Input Section */}
-            <div className="space-y-4">
+            <div className="space-y-6">
               <div className="relative group">
+                {/* Glow effect behind input */}
+                <div className="absolute -inset-2 bg-gradient-to-r from-amber-400/20 via-orange-500/20 to-amber-400/20 rounded-3xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                 <input
                   type="text"
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleInitialSubmit()}
                   placeholder={isChatMode ? "Describe what you want to learn..." : "Enter a topic..."}
-                  className="w-full bg-zinc-900 border border-zinc-800 text-white text-lg px-6 py-5 rounded-2xl shadow-lg focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50 transition-all placeholder-zinc-500"
+                  className="relative w-full bg-zinc-900/90 border-2 border-zinc-700 text-white text-lg md:text-xl px-8 py-6 rounded-2xl shadow-2xl focus:outline-none focus:ring-4 focus:ring-amber-400/30 focus:border-amber-400 transition-all placeholder-zinc-500"
                 />
                 <button
                   onClick={handleInitialSubmit}
                   disabled={isLoading || !topic.trim()}
-                  className="absolute right-3 top-3 bottom-3 bg-amber-400 hover:bg-amber-500 text-zinc-950 rounded-xl px-6 flex items-center gap-2 transition-all disabled:opacity-50 font-semibold"
+                  className="absolute right-3 top-3 bottom-3 bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-500 hover:to-orange-600 text-zinc-950 rounded-xl px-8 flex items-center gap-2 transition-all disabled:opacity-50 font-bold text-lg shadow-lg"
                 >
                   {isLoading ? (
                     <span className="animate-spin h-5 w-5 border-2 border-black border-t-transparent rounded-full"></span>
@@ -748,7 +914,6 @@ function App() {
                   </div>
 
                   <div className="space-y-5">
-                    {/* Knowledge Level */}
                     <div>
                       <label className="block text-zinc-400 text-sm font-medium mb-2">Knowledge Level</label>
                       <select
@@ -763,7 +928,6 @@ function App() {
                       </select>
                     </div>
 
-                    {/* Preferred Depth */}
                     <div>
                       <label className="block text-zinc-400 text-sm font-medium mb-2">Preferred Depth</label>
                       <select
@@ -778,16 +942,24 @@ function App() {
                       </select>
                     </div>
 
-                    {/* Custom Instructions */}
                     <div>
                       <label className="block text-zinc-400 text-sm font-medium mb-2">Custom Instructions (Optional)</label>
                       <textarea
                         value={preferences.customInstructions}
                         onChange={e => updatePreferences({ customInstructions: e.target.value })}
-                        placeholder="E.g., Focus on practical examples, include code snippets, use analogies from sports..."
+                        placeholder="E.g., Focus on practical examples..."
                         rows={3}
                         className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-white placeholder-zinc-500 focus:border-amber-400 focus:outline-none transition-colors resize-none"
                       />
+                      <label className="flex items-center gap-2 mt-2 text-sm text-zinc-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={saveCustomInstructions}
+                          onChange={e => setSaveCustomInstructions(e.target.checked)}
+                          className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-amber-400 focus:ring-amber-400 focus:ring-offset-zinc-900"
+                        />
+                        Save for future queries
+                      </label>
                     </div>
                   </div>
 
@@ -800,26 +972,48 @@ function App() {
                 </div>
               </div>
             )}
-
-            {/* Mobile History */}
-            {history.length > 0 && (
-              <div className="md:hidden mt-8 text-left">
-                <h3 className="text-zinc-600 uppercase text-xs font-bold tracking-widest mb-3">Continue Learning</h3>
-                <div className="space-y-2">
-                  {history.slice(0, 3).map((item) => (
-                    <button
-                      key={item.id}
-                      onClick={() => loadFromHistory(item)}
-                      className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:bg-zinc-900 hover:border-zinc-700 transition-all"
-                    >
-                      <span className="text-zinc-300 font-medium">{item.topic}</span>
-                      <Icons.ArrowRight />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
+          </div>
+
+          {/* Curated Topics Section - Below hero, solid background */}
+          <div className="bg-zinc-950 border-t border-zinc-900 px-6 md:px-12 py-16">
+            <div className="max-w-6xl mx-auto">
+              <h3 className="text-white text-2xl font-bold mb-10 text-center">Curated Experiences</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                {CURATED_TOPICS.map((curatedTopic) => (
+                  <CuratedTopicCard
+                    key={curatedTopic.id}
+                    topic={curatedTopic}
+                    onClick={() => {
+                      setCurriculum(curatedTopic.curriculum);
+                      // Don't set topic to avoid filling home page prompt bar
+                      setRefinementMessages([]);
+                      setView('CURRICULUM_REVIEW');
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Mobile History */}
+          {history.length > 0 && (
+            <div className="md:hidden bg-zinc-950 px-6 py-8">
+              <h3 className="text-zinc-600 uppercase text-xs font-bold tracking-widest mb-3">Continue Learning</h3>
+              <div className="space-y-2">
+                {history.slice(0, 3).map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => loadFromHistory(item)}
+                    className="w-full flex items-center justify-between p-4 rounded-xl bg-zinc-900/50 border border-zinc-800/50 hover:bg-zinc-900 hover:border-zinc-700 transition-all"
+                  >
+                    <span className="text-zinc-300 font-medium">{item.title || item.topic}</span>
+                    <Icons.ArrowRight />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -910,26 +1104,23 @@ function App() {
     );
   }
 
-  // CURRICULUM_REVIEW VIEW (New - Two-phase flow)
+  // CURRICULUM_REVIEW VIEW (Clean, minimal redesign)
   if (view === 'CURRICULUM_REVIEW' && curriculum) {
     return (
       <div className="h-screen bg-zinc-950 flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="border-b border-zinc-800 bg-zinc-900/50 p-4 md:p-6">
-          <div className="max-w-4xl mx-auto flex justify-between items-center">
-            <div>
-              <button
-                onClick={() => setView('HOME')}
-                className="text-zinc-500 hover:text-white text-sm flex items-center gap-2 mb-2 transition-colors"
-              >
-                <Icons.ArrowLeft /> Back
-              </button>
-              <h1 className="text-2xl md:text-3xl font-bold text-white">{curriculum.title}</h1>
-            </div>
+        {/* Minimal Header */}
+        <div className="flex-shrink-0 border-b border-zinc-900 bg-zinc-950 px-6 py-4">
+          <div className="max-w-6xl mx-auto flex justify-between items-center">
+            <button
+              onClick={() => setView('HOME')}
+              className="text-zinc-500 hover:text-white text-sm flex items-center gap-2 transition-colors"
+            >
+              <Icons.ArrowLeft /> Back
+            </button>
             <button
               onClick={handleGenerateExperience}
               disabled={isLoading}
-              className="bg-amber-400 hover:bg-amber-500 text-black px-6 py-3 rounded-full font-semibold transition-all disabled:opacity-50 flex items-center gap-2"
+              className="bg-amber-400 hover:bg-amber-500 text-black px-5 py-2.5 rounded-full font-semibold transition-all disabled:opacity-50 flex items-center gap-2 text-sm"
             >
               {isLoading ? (
                 <>
@@ -938,58 +1129,64 @@ function App() {
                 </>
               ) : (
                 <>
-                  <Icons.Sparkles /> Generate Experience
+                  Generate Experience <Icons.ArrowRight />
                 </>
               )}
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-5xl mx-auto p-4 md:p-6 pb-20 space-y-8">
-            {/* Overview Section */}
-            <div className="text-center max-w-3xl mx-auto space-y-4">
-              <p className="text-zinc-400 text-lg leading-relaxed">{curriculum.overview}</p>
+        {/* Scrollable Content */}
+        <div ref={contentScrollRef} className="flex-1 overflow-y-auto">
+          <div className="max-w-6xl mx-auto px-6 py-10 space-y-12">
+
+            {/* Title + Overview Section */}
+            <div className="text-center space-y-4">
+              <h1 className="text-3xl md:text-4xl font-bold text-white tracking-tight leading-tight">
+                {curriculum.title}
+              </h1>
+              <p className="text-zinc-400 text-lg leading-relaxed max-w-4xl mx-auto">
+                {curriculum.overview}
+              </p>
             </div>
 
-            {/* Learning Goals as horizontal badges */}
-            <div className="flex flex-wrap justify-center gap-3">
-              {curriculum.learningGoals.map((goal, idx) => (
-                <div key={idx} className="flex items-center gap-2 bg-zinc-900/50 border border-zinc-800 rounded-full px-4 py-2">
-                  <div className="w-5 h-5 rounded-full bg-amber-400/20 text-amber-400 flex items-center justify-center flex-shrink-0 text-xs font-bold">
-                    {idx + 1}
-                  </div>
-                  <span className="text-zinc-300 text-sm">{goal}</span>
-                </div>
-              ))}
-            </div>
-
-            {/* Modules Grid - 3 columns */}
+            {/* Modules Section */}
             <div className="space-y-6">
-              <h2 className="text-xl font-semibold text-white text-center">Your Learning Journey</h2>
-              <div className="grid md:grid-cols-3 gap-5">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-white">Modules</h2>
+                <span className="text-zinc-500 text-sm">
+                  {curriculum.modules.length} modules • {curriculum.modules.reduce((acc, m) => acc + m.slides.length, 0)} topics
+                </span>
+              </div>
+
+              <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {curriculum.modules.map((module, modIdx) => (
-                  <div key={module.id} className="bg-zinc-900/30 border border-zinc-800 rounded-xl p-5 hover:border-zinc-700 transition-colors flex flex-col">
-                    {/* Module Header */}
-                    <div className="flex items-start gap-3 mb-4">
-                      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 text-black flex items-center justify-center font-bold text-lg flex-shrink-0">
-                        {modIdx + 1}
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-white font-semibold leading-tight text-base">{module.title}</h3>
-                      </div>
+                  <div
+                    key={module.id}
+                    className="group border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 hover:bg-zinc-900/30 transition-all duration-200 flex flex-col"
+                  >
+                    {/* Module Number */}
+                    <div className="text-amber-400 text-sm font-medium mb-2">
+                      Module {String(modIdx + 1).padStart(2, '0')}
                     </div>
 
-                    {/* Description - Full text */}
-                    <p className="text-zinc-400 text-sm leading-relaxed mb-4">{module.description}</p>
+                    {/* Module Title */}
+                    <h3 className="text-white font-semibold text-lg mb-2 leading-snug group-hover:text-amber-50 transition-colors">
+                      {module.title}
+                    </h3>
 
-                    {/* Slide Topics */}
-                    <div className="border-t border-zinc-800/50 pt-3 mt-auto">
-                      <div className="text-zinc-600 text-xs uppercase tracking-wider mb-2">Topics</div>
+                    {/* Module Description */}
+                    <p className="text-zinc-500 text-sm leading-relaxed mb-4">
+                      {module.description}
+                    </p>
+
+                    {/* Subtopics List */}
+                    <div className="mt-auto pt-4 border-t border-zinc-800/50">
+                      <div className="text-zinc-600 text-xs font-medium mb-2">Topics</div>
                       <ul className="space-y-1.5">
                         {module.slides.map((slide) => (
                           <li key={slide.id} className="text-zinc-400 text-sm flex items-start gap-2">
-                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400/50 flex-shrink-0 mt-1.5"></span>
+                            <span className="w-1 h-1 rounded-full bg-amber-400/50 flex-shrink-0 mt-2"></span>
                             <span>{slide.title}</span>
                           </li>
                         ))}
@@ -1000,97 +1197,100 @@ function App() {
               </div>
             </div>
 
-            {/* By the end summary */}
-            <div className="bg-gradient-to-r from-amber-400/10 to-orange-400/10 border border-amber-400/20 rounded-2xl p-6 text-center">
-              <h3 className="text-white font-semibold mb-2">By the end of this experience</h3>
-              <p className="text-zinc-400">
-                You'll have a comprehensive understanding of <span className="text-amber-400 font-medium">{curriculum.title.replace(/^(Deep Dive into |Introduction to |The |A )/i, '')}</span>,
-                covering {curriculum.modules.length} modules and {curriculum.modules.reduce((acc, m) => acc + m.slides.length, 0)} topics
-                designed to build your knowledge from the ground up.
-              </p>
-            </div>
+            {/* Learning Goals - Collapsed/Minimal */}
+            {curriculum.learningGoals.length > 0 && (
+              <div className="border-t border-zinc-900 pt-10">
+                <details className="group">
+                  <summary className="text-zinc-500 text-sm cursor-pointer hover:text-zinc-300 transition-colors list-none flex items-center gap-2">
+                    <Icons.BookOpen />
+                    <span>View learning goals ({curriculum.learningGoals.length})</span>
+                    <span className="text-zinc-700 group-open:rotate-180 transition-transform">▼</span>
+                  </summary>
+                  <ul className="mt-4 space-y-2 pl-6">
+                    {curriculum.learningGoals.map((goal, idx) => (
+                      <li key={idx} className="text-zinc-400 text-sm flex items-start gap-3">
+                        <span className="text-amber-400/60 mt-0.5">✓</span>
+                        <span>{goal}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
+            )}
 
-            {/* Refinement Section - Mode specific */}
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">
-                {isChatMode ? 'Refine Your Curriculum' : 'Adjust Curriculum'}
-              </h2>
-
-              {isChatMode ? (
-                // Chat mode: Conversation-based refinement
-                <div className="space-y-4">
-                  {refinementMessages.length > 0 && (
-                    <div className="space-y-3 max-h-60 overflow-y-auto">
+            {/* Refinement Section - At bottom of content */}
+            <div className="border-t border-zinc-900 pt-10">
+              <div className="max-w-3xl mx-auto">
+                <h3 className="text-zinc-400 text-sm font-medium mb-4 text-center">Want to adjust the curriculum?</h3>
+                <div className="bg-zinc-900/50 border border-zinc-800 rounded-2xl p-4">
+                  {/* Chat messages (if any) */}
+                  {(isChatMode ? refinementMessages : []).length > 0 && (
+                    <div className="space-y-3 max-h-48 overflow-y-auto mb-4 pr-2">
                       {refinementMessages.map((msg, idx) => (
                         <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                          <div className={`max-w-[80%] p-3 rounded-xl text-sm ${
+                          <div className={`max-w-[80%] px-4 py-2 rounded-xl text-sm ${
                             msg.role === 'user'
-                            ? 'bg-zinc-800 text-white'
-                            : 'bg-zinc-950 border border-zinc-700 text-zinc-300'
+                              ? 'bg-zinc-800 text-white'
+                              : 'bg-zinc-950 text-zinc-400'
                           }`}>
                             {msg.text}
                           </div>
                         </div>
                       ))}
                       {isRefiningCurriculum && (
-                        <div className="flex justify-start">
-                          <div className="bg-zinc-950 border border-zinc-700 p-3 rounded-xl text-zinc-500 text-sm animate-pulse">
-                            Updating curriculum...
-                          </div>
-                        </div>
+                        <div className="text-zinc-500 text-sm animate-pulse">Updating...</div>
                       )}
                       <div ref={refinementEndRef} />
                     </div>
                   )}
-                  <div className="flex gap-2">
+
+                  {/* Input */}
+                  <div className="flex gap-3">
                     <input
-                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-zinc-700"
+                      type="text"
+                      value={isChatMode ? '' : adjustPrompt}
+                      onChange={isChatMode ? undefined : (e) => setAdjustPrompt(e.target.value)}
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-zinc-700 placeholder-zinc-600"
                       placeholder="e.g., Add more examples, focus on practical applications..."
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !isRefiningCurriculum) {
-                          handleRefinementSend(e.currentTarget.value);
-                          e.currentTarget.value = '';
+                          if (isChatMode) {
+                            handleRefinementSend(e.currentTarget.value);
+                            e.currentTarget.value = '';
+                          } else {
+                            handleAdjustCurriculum();
+                          }
                         }
                       }}
                     />
-                  </div>
-                  <p className="text-zinc-600 text-xs">
-                    Chat with AI to adjust the curriculum. When you're happy, click "Generate Experience" above.
-                  </p>
-                </div>
-              ) : (
-                // Direct mode: Prompt-based adjustment
-                <div className="space-y-4">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={adjustPrompt}
-                      onChange={(e) => setAdjustPrompt(e.target.value)}
-                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-zinc-700"
-                      placeholder="e.g., Add a module on advanced topics, remove the basics..."
-                      onKeyDown={(e) => e.key === 'Enter' && handleAdjustCurriculum()}
-                    />
                     <button
-                      onClick={handleAdjustCurriculum}
-                      disabled={isRefiningCurriculum || !adjustPrompt.trim()}
-                      className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
+                      onClick={isChatMode ? () => {
+                        const input = document.querySelector('input[placeholder*="Add more examples"]') as HTMLInputElement;
+                        if (input?.value) {
+                          handleRefinementSend(input.value);
+                          input.value = '';
+                        }
+                      } : handleAdjustCurriculum}
+                      disabled={isRefiningCurriculum || (!isChatMode && !adjustPrompt.trim())}
+                      className="bg-zinc-800 hover:bg-zinc-700 text-white px-5 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
                     >
-                      {isRefiningCurriculum ? 'Adjusting...' : 'Adjust'}
+                      {isRefiningCurriculum ? '...' : 'Adjust'}
                     </button>
                   </div>
-                  <p className="text-zinc-600 text-xs">
-                    Describe how you'd like to modify the curriculum. When you're happy, click "Generate Experience" above.
-                  </p>
                 </div>
-              )}
+              </div>
             </div>
+
+            {/* Bottom padding */}
+            <div className="h-8"></div>
           </div>
         </div>
 
+        {/* Full-screen loading overlay */}
         {isLoading && (
-          <div className="fixed inset-0 bg-zinc-950/80 flex items-center justify-center z-50">
+          <div className="fixed inset-0 bg-zinc-950/90 flex items-center justify-center z-50">
             <div className="text-center space-y-4">
-              <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center mx-auto animate-pulse">
+              <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center mx-auto">
                 <Icons.Sparkles />
               </div>
               <p className="text-white font-medium">{loadingText}</p>
@@ -1268,7 +1468,7 @@ function App() {
           </div>
 
           {/* Slide Content */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-28">
+          <div ref={contentScrollRef} className="flex-1 overflow-y-auto p-4 md:p-8 pb-28">
             <div className="max-w-4xl mx-auto w-full">
               {isGeneratingModule ? (
                 <div className="flex flex-col items-center justify-center min-h-[60vh] space-y-6 animate-pulse">

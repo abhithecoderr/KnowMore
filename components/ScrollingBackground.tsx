@@ -117,9 +117,26 @@ const ScrollingBackground: React.FC = () => {
   const { columns, imageWidth, imageHeight, gap, opacity, padding } = CONFIG;
   const [columnImages, setColumnImages] = useState<string[][]>([[], [], [], []]);
 
-  // Fetch images on mount
+  // Cache key for localStorage
+  const CACHE_KEY = 'omnilearn_bg_images';
+  const CACHE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+  // Fetch images on mount, using localStorage cache
   useEffect(() => {
     const fetchAllImages = async () => {
+      // Check localStorage cache first
+      try {
+        const cached = localStorage.getItem(CACHE_KEY);
+        if (cached) {
+          const { images, timestamp } = JSON.parse(cached);
+          if (Date.now() - timestamp < CACHE_EXPIRY_MS && images?.length > 0) {
+            setColumnImages(images);
+            return; // Use cached images
+          }
+        }
+      } catch { /* Cache read failed, fetch fresh */ }
+
+      // Fetch fresh images from Wikimedia
       const activeKeywords = COLUMN_KEYWORDS.slice(0, columns);
 
       const results = await Promise.all(
@@ -135,6 +152,14 @@ const ScrollingBackground: React.FC = () => {
       );
 
       setColumnImages(results);
+
+      // Cache results in localStorage
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          images: results,
+          timestamp: Date.now()
+        }));
+      } catch { /* Cache write failed, ignore */ }
     };
 
     fetchAllImages();

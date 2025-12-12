@@ -150,6 +150,8 @@ export interface Slide {
   id: string;
   title: string;
   blocks: ContentBlock[];
+  audioUrl?: string;       // TTS audio blob URL
+  audioLoading?: boolean;  // Whether TTS is being generated
 }
 
 export interface Module {
@@ -157,7 +159,8 @@ export interface Module {
   title: string;
   description: string;
   slides: Slide[];
-  isLoaded: boolean;  // Whether full content has been generated
+  isLoaded: boolean;       // Whether full content has been generated
+  ttsGenerated?: boolean;  // Whether TTS audio has been generated for this module
 }
 
 // ============================================

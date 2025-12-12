@@ -13,14 +13,17 @@ const PIXABAY_KEY = "53631556-267a3b1b6dca0533d6b8fe2fa";
 
 // Model configuration - customize models for each role
 const MODELS = {
-  CONSULTANT: "gemma-3-27b-it",       // Pre-curriculum chat
+  CONSULTANT: "gemini-robotics-er-1.5-preview",       // Pre-curriculum chat
   CURRICULUM: "gemini-robotics-er-1.5-preview",       // Curriculum structure generation
   CONTENT: "gemini-robotics-er-1.5-preview", //gemini-robotics-er-1.5-preview,          // Slide content generation
   CHAT: "gemma-3-27b-it",             // Learning view chat assistant
-  IMAGE_ANALYSIS: "gemma-3-12b-it",   // Image selection
+  IMAGE_ANALYSIS: "gemma-3-27b-it",   // Image selection
   ANSWER_EVAL: "gemma-3-12b-it",      // User answer evaluation
   TTS: "gemini-2.5-flash-preview-tts" // Text-to-speech
 };
+
+// Toggle TTS generation on/off (set to false to disable TTS and save API calls)
+export const TTS_ENABLED = false;
 
 
 const ai = new GoogleGenAI({ apiKey: API_KEY });
@@ -116,6 +119,12 @@ export interface ModuleContent {
 export interface ConsultantResult {
   text: string;
   shouldGenerateCurriculum: boolean;
+  curriculumContext?: {
+    topic: string;
+    interests?: string[];
+    knowledgeLevel?: string;
+    goals?: string;
+  };
 }
 
 // ============================================
@@ -196,17 +205,17 @@ async function validateUrlAccessible(url: string): Promise<boolean> {
   }
 }
 
-/** Convert image URL to Base64 with comprehensive logging and error handling */
-async function urlToBase64Part(url: string, retries = 2): Promise<any> {
+/** Convert image URL to Base64 - NO RETRIES for faster parallel processing */
+async function urlToBase64Part(url: string): Promise<any> {
   const startTime = Date.now();
   const urlShort = url.slice(-50);
 
   try {
     console.log(`      [Fetch] ${urlShort}`);
 
-    // 1. Fetch with timeout
+    // Fetch with short timeout for parallel speed
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -215,37 +224,23 @@ async function urlToBase64Part(url: string, retries = 2): Promise<any> {
     });
     clearTimeout(timeoutId);
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
+    if (!response.ok) return null;
 
-    // 2. Validate content type
     const contentType = response.headers.get('content-type') || 'image/jpeg';
-    if (!contentType.startsWith('image/')) {
-      throw new Error(`Invalid content-type: ${contentType}`);
-    }
+    if (!contentType.startsWith('image/')) return null;
 
-    // 3. Download image data
     const arrayBuffer = await response.arrayBuffer();
-    const sizeKB = (arrayBuffer.byteLength / 1024).toFixed(1);
-    console.log(`      [Convert] ${sizeKB}KB → base64`);
+    if (arrayBuffer.byteLength < 500) return null; // Too small, skip
 
-    if (arrayBuffer.byteLength < 500) {
-      throw new Error(`Image too small: ${arrayBuffer.byteLength} bytes`);
-    }
-
-    // 4. Convert to base64 (chunked for large images)
+    // Convert to base64
     let base64: string;
     if (typeof Buffer !== 'undefined') {
-      // Node.js
       base64 = Buffer.from(arrayBuffer).toString('base64');
     } else {
-      // Browser - use chunked conversion for large images to avoid call stack size exceeded
       const bytes = new Uint8Array(arrayBuffer);
       if (bytes.length > 100000) {
-        // > 100KB: chunk into smaller pieces to avoid stack overflow
         const chunks: string[] = [];
-        const chunkSize = 50000; // 50KB chunks
+        const chunkSize = 50000;
         for (let i = 0; i < bytes.length; i += chunkSize) {
           const chunk = bytes.slice(i, i + chunkSize);
           chunks.push(String.fromCharCode.apply(null, Array.from(chunk)));
@@ -256,8 +251,8 @@ async function urlToBase64Part(url: string, retries = 2): Promise<any> {
       }
     }
 
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`      [Success] ${elapsed}s`);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`      [OK] ${(arrayBuffer.byteLength/1024).toFixed(0)}KB, ${elapsed}s`);
 
     return {
       inlineData: {
@@ -266,41 +261,26 @@ async function urlToBase64Part(url: string, retries = 2): Promise<any> {
       }
     };
 
-  } catch (error: any) {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-
-    // Detailed error classification
-    let errorType = 'Error';
-    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-      errorType = 'Timeout';
-    } else if (error.message?.includes('HTTP')) {
-      errorType = 'HTTP';
-    } else if (error.message?.includes('content-type')) {
-      errorType = 'InvalidType';
-    }
-
-    console.warn(`      [${errorType}] ${elapsed}s - ${error.message}`);
-
-    // Retry with exponential backoff
-    if (retries > 0 && errorType !== 'InvalidType') {
-      const backoffMs = (3 - retries) * 1500; // 0ms, 1500ms, 3000ms
-      if (backoffMs > 0) {
-        console.log(`      [Retry] Waiting ${backoffMs}ms (${3 - retries}/2)`);
-        await new Promise(r => setTimeout(r, backoffMs));
-      }
-      return urlToBase64Part(url, retries - 1);
-    }
-
-    return null;
+  } catch (e) {
+    return null; // Fail fast, no retries - other parallel images will succeed
   }
 }
 
 // ============================================
-// IMAGE HANDLING
+// IMAGE HANDLING (OPTIMIZED)
 // ============================================
 
-/** Fetch images from Wikimedia Commons (primary source) - optimized for reliability */
-async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]> {
+/** Image with dual URLs for analysis/display */
+interface DualImage {
+  analysisUrl: string;  // Low-res for AI analysis
+  displayUrl: string;   // High-res for frontend display
+}
+
+/** Simple in-memory cache for image selections */
+const imageCache = new Map<string, string>();
+
+/** Fetch images from Wikimedia Commons with DUAL URLs (200px AI, 600px display) */
+async function fetchFromWikimedia(keywords: string, count = 3): Promise<DualImage[]> {
   try {
     console.log(`\n   🔎 Wikimedia search: "${keywords}"`);
 
@@ -311,12 +291,12 @@ async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]
       origin: '*',
       action: 'query',
       generator: 'search',
-      gsrsearch: `${cleanKeywords} filetype:bitmap -fileres:0 `, // Curated images with 'depicts' metadata
-      gsrnamespace: '6', // File namespace
-      gsrlimit: String(Math.min(count + 5, 10)), // Fewer candidates needed
+      gsrsearch: `${cleanKeywords} filetype:bitmap -fileres:0`,
+      gsrnamespace: '6',
+      gsrlimit: String(Math.min(count + 3, 8)),
       prop: 'imageinfo',
-      iiprop: 'url|mime|size|mediatype', // Get full metadata
-      iiurlwidth: '400', // Medium thumbnails for good detail (~30-80KB)
+      iiprop: 'url|mime|size|mediatype',
+      iiurlwidth: '200', // Small for AI analysis
       format: 'json'
     });
 
@@ -328,36 +308,33 @@ async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]
       return [];
     }
 
-    const urls: string[] = [];
+    const images: DualImage[] = [];
     const pages = Object.values(data.query.pages) as any[];
 
-    console.log(`      📋 Found ${pages.length} candidates, filtering...`);
+    console.log(`      📋 Found ${pages.length} candidates`);
 
     for (const page of pages) {
       const info = page.imageinfo?.[0];
       if (!info) continue;
 
-      // Filter 1: MIME type - only accept actual image formats
       const mime = info.mime || '';
-      if (!mime.startsWith('image/')) {
-        continue; // Silent skip for non-images
-      }
+      if (!mime.startsWith('image/')) continue;
 
-      // Get URL - prefer sized thumbnail
-      const imageUrl = info.thumburl || info.url;
-      if (!imageUrl) continue;
+      const analysisUrl = info.thumburl || info.url;
+      if (!analysisUrl) continue;
 
-      const width = info.width || 0;
-      const height = info.height || 0;
+      // Create 600px display URL from thumburl pattern
+      const displayUrl = analysisUrl.replace(/\/(\d+)px-/, '/600px-');
+
       const sizeKB = ((info.size || 0) / 1024).toFixed(0);
-      console.log(`      ✓ ${width}x${height}, ${sizeKB}KB`);
-      urls.push(imageUrl);
+      console.log(`      ✓ ${sizeKB}KB`);
 
-      if (urls.length >= count) break;
+      images.push({ analysisUrl, displayUrl });
+      if (images.length >= count) break;
     }
 
-    console.log(`      → Returning ${urls.length} URLs`);
-    return urls;
+    console.log(`      → Returning ${images.length} dual-URL images`);
+    return images;
 
   } catch (e: any) {
     console.warn(`      ⚠️ Wikimedia fetch error: ${e.message}`);
@@ -365,25 +342,19 @@ async function fetchFromWikimedia(keywords: string, count = 5): Promise<string[]
   }
 }
 
-/** Pixabay image with dual URLs */
-interface PixabayImage {
-  analysisUrl: string;  // previewURL - low res for AI
-  displayUrl: string;   // webformatURL - high res for frontend
-}
-
-/** Fetch images from Pixabay with dual URLs for analysis/display */
-async function fetchFromPixabay(keywords: string, count = 3): Promise<PixabayImage[]> {
+/** Fetch images from Pixabay with dual URLs (preview for AI, webformat for display) */
+async function fetchFromPixabay(keywords: string, count = 2): Promise<DualImage[]> {
   try {
-    const query = keywords.replace(/[^a-zA-Z0-9\s]/g, '').trim().split(/\s+/).slice(0, 3).join('+');
-    const url = `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${query}&orientation=horizontal&per_page=${count + 3}&safesearch=true`;
+    const query = keywords.replace(/[^a-zA-Z0-9\s]/g, '').trim().split(/\s+/).slice(0, 5).join('+');
+    const url = `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${query}&orientation=horizontal&per_page=${count + 2}&safesearch=true`;
 
     const res = await fetch(url);
     const data = await res.json();
 
     if (data.hits?.length > 0) {
       return data.hits.slice(0, count).map((h: any) => ({
-        analysisUrl: h.previewURL,    // Small URL for AI analysis
-        displayUrl: h.webformatURL    // Large URL for frontend display
+        analysisUrl: h.previewURL,
+        displayUrl: h.webformatURL
       }));
     }
   } catch (e) {
@@ -400,12 +371,10 @@ function isNatureTopic(keywords: string): boolean {
 
 
 /** Legacy function for backward compatibility */
-export async function fetchImageCandidates(keywords: string, count = 4): Promise<string[]> {
+export async function fetchImageCandidates(keywords: string, count = 5): Promise<string[]> {
+  // NOTE: Pixabay disabled - using only Wikimedia for more accurate images
   const wiki = await fetchFromWikimedia(keywords, count);
-  if (wiki.length > 0) return wiki;
-
-  const pixabay = await fetchFromPixabay(keywords, 3);
-  if (pixabay.length > 0) return pixabay.map(p => p.displayUrl);
+  if (wiki.length > 0) return wiki.map(w => w.displayUrl);
 
   return [`https://placehold.co/800x450/27272a/71717a?text=${encodeURIComponent(keywords.slice(0, 20))}`];
 }
@@ -417,51 +386,39 @@ interface ImageSelectionResult {
   selectedUrl?: string;          // URL for display
 }
 
-/** Analyze images with AI and get selection or alternate keyword suggestion */
+/** Analyze images with AI using PARALLEL Base64 conversion */
 async function analyzeImagesWithAI(
-  imageUrls: string[],
-  displayUrls: string[],  // Separate array for actual display URLs
+  images: DualImage[],
   slideTitle: string,
   slideContext: string,
   keywords: string,
   allowKeywordSuggestion: boolean = true
 ): Promise<ImageSelectionResult> {
-  console.log(`\n   🔍 Image Selection for: "${slideTitle.slice(0, 40)}..."`);
-  console.log(`      Keywords: "${keywords}"`);
-  console.log(`      Candidates: ${imageUrls.length} images`);
+  console.log(`\n   🔍 AI Analysis for: "${slideTitle.slice(0, 40)}..."`);
+  console.log(`      Candidates: ${images.length} images`);
 
-  if (imageUrls.length === 0) {
+  if (images.length === 0) {
     return { selectedIndex: null };
   }
 
-  if (imageUrls.length === 1) {
-    console.log(`      → Using only available image`);
-    return { selectedIndex: 0, selectedUrl: displayUrls[0] };
-  }
-
   try {
-    // Convert URLs to Base64 parts sequentially
-    const validParts: { part: any; displayUrl: string; index: number }[] = [];
+    // PARALLEL Base64 conversion - major speed improvement
     const conversionStart = Date.now();
+    console.log(`      ⚡ Starting PARALLEL image conversion...`);
 
-    console.log(`\n      Starting sequential image conversion...`);
+    const results = await Promise.allSettled(
+      images.map(img => urlToBase64Part(img.analysisUrl))
+    );
 
-    for (let i = 0; i < imageUrls.length; i++) {
-      console.log(`\n      [${i + 1}/${imageUrls.length}] Processing...`);
-
-      const part = await urlToBase64Part(imageUrls[i]);
-      if (part) {
-        validParts.push({ part, displayUrl: displayUrls[i], index: i });
+    const validParts: { part: any; displayUrl: string; index: number }[] = [];
+    results.forEach((result, i) => {
+      if (result.status === 'fulfilled' && result.value) {
+        validParts.push({ part: result.value, displayUrl: images[i].displayUrl, index: i });
       }
-
-      // Small delay between fetches
-      if (i < imageUrls.length - 1) {
-        await new Promise(r => setTimeout(r, 50));
-      }
-    }
+    });
 
     const conversionTime = ((Date.now() - conversionStart) / 1000).toFixed(1);
-    console.log(`\n      📊 Conversion complete in ${conversionTime}s: ${validParts.length}/${imageUrls.length}`);
+    console.log(`      📊 Parallel conversion: ${conversionTime}s (${validParts.length}/${images.length} success)`);
 
     if (validParts.length === 0) {
       console.log(`      → Failed to load any images`);
@@ -470,13 +427,8 @@ async function analyzeImagesWithAI(
 
     // Build multimodal content
     const contents: any[] = [
-      { text: `You are selecting the best image for an educational slide.
-
-SLIDE TOPIC: "${slideTitle}"
-SEARCH KEYWORDS: "${keywords}"
-CONTEXT: ${slideContext || 'General educational content'}
-
-I have ${validParts.length} candidate images. Analyze each one.
+      { text: `Select the best image for an educational slide about: "${slideTitle}"
+Keywords: "${keywords}"
 
 ` }
     ];
@@ -484,31 +436,21 @@ I have ${validParts.length} candidate images. Analyze each one.
     validParts.forEach((item, i) => {
       contents.push({ text: `Image ${i + 1}: ` });
       contents.push(item.part);
-      contents.push({ text: '\n\n' });
+      contents.push({ text: '\n' });
     });
 
     if (allowKeywordSuggestion) {
       contents.push({
-        text: `TASK: Select the BEST image for this educational slide.
-
-For EACH image, describe what you see (1 sentence).
-Then decide: Is ANY image appropriate for the topic "${slideTitle}"?
-
-RESPOND IN THIS EXACT FORMAT:
-Image 1: [what you see]
-Image 2: [what you see]
-...
-DECISION: [SELECTED or NONE]
-SELECTED_NUMBER: [number if selected, or 0 if none]
-ALT_KEYWORD: [if NONE, suggest a better 2-4 word search keyword, otherwise leave empty]`
+        text: `\nWhich image best represents "${slideTitle}"?
+RESPOND:
+DECISION: SELECTED or NONE
+SELECTED_NUMBER: [1-${validParts.length}] or 0
+ALT_KEYWORD: [if NONE, 3-5 word search term]`
       });
     } else {
       contents.push({
-        text: `TASK: Select the BEST image for this educational slide.
-Pick the best one, even if not perfect.
-
-RESPOND IN THIS EXACT FORMAT:
-SELECTED: [number] because [brief reason]`
+        text: `\nPick the best image (even if imperfect).
+SELECTED: [number]`
       });
     }
 
@@ -520,12 +462,7 @@ SELECTED: [number] because [brief reason]`
     });
 
     const responseText = response.text || "";
-
-    // Log the AI's analysis for debugging
-    console.log(`      📝 AI Response:`);
-    responseText.split('\n').slice(0, 10).forEach(line => {
-      if (line.trim()) console.log(`         ${line.trim()}`);
-    });
+    console.log(`      📝 AI: ${responseText.split('\n')[0]}`);
 
     // Parse response
     if (allowKeywordSuggestion) {
@@ -534,9 +471,9 @@ SELECTED: [number] because [brief reason]`
       const altKeywordMatch = responseText.match(/ALT_KEYWORD:\s*([^\n]+)/i);
 
       if (decisionMatch?.[1]?.toUpperCase() === 'NONE') {
-        let suggestedKeyword = altKeywordMatch?.[1]?.trim()?.replace(/^["']+|["']+$/g, '');
+        const suggestedKeyword = altKeywordMatch?.[1]?.trim()?.replace(/^["']+|["']+$/g, '');
         if (suggestedKeyword && suggestedKeyword.length > 0 && suggestedKeyword.toLowerCase() !== 'empty') {
-          console.log(`      🔄 No suitable image. AI suggests: "${suggestedKeyword}"`);
+          console.log(`      🔄 No match. AI suggests: "${suggestedKeyword}"`);
           return { selectedIndex: null, suggestedKeyword };
         }
       }
@@ -556,12 +493,12 @@ SELECTED: [number] because [brief reason]`
     }
 
     // Fallback: first image
-    console.log(`      → Defaulting to first loaded image`);
+    console.log(`      → Using first available image`);
     return { selectedIndex: validParts[0].index, selectedUrl: validParts[0].displayUrl };
 
   } catch (e) {
     console.warn(`      ⚠️ AI selection failed:`, e);
-    return { selectedIndex: 0, selectedUrl: displayUrls[0] };
+    return { selectedIndex: 0, selectedUrl: images[0].displayUrl };
   }
 }
 
@@ -571,120 +508,107 @@ function getPlaceholderUrl(keywords: string): string {
 }
 
 /**
- * Select the best image with Wikimedia-priority flow.
+ * OPTIMIZED image selection with parallel fetching and caching.
  *
- * STANDARD FLOW:
- * 1. Wikimedia 5 images → AI analysis
- * 2. If rejected → Wikimedia 5 with AI-suggested keyword
- * 3. If still rejected → Wikimedia 5 (3rd keyword) + Pixabay 3 backup
- *
- * NATURE/ANIMAL TOPICS:
- * After 1st Wikimedia try, immediately include Pixabay
+ * Flow:
+ * 1. Check cache first
+ * 2. Fetch Wikimedia + Pixabay IN PARALLEL (3+2 images)
+ * 3. AI analyzes all candidates at once
+ * 4. If rejected, retry with AI-suggested keyword (1 retry max)
  */
 export async function selectBestImage(
   slideTitle: string,
   slideContext: string,
   keywords: string = ""
 ): Promise<string> {
+  const cacheKey = `${keywords.toLowerCase().trim()}`;
+
+  // Check cache first
+  if (imageCache.has(cacheKey)) {
+    console.log(`📷 Cache hit for: "${keywords}"`);
+    return imageCache.get(cacheKey)!;
+  }
+
   console.log(`\n📷 Image Selection for: "${slideTitle}"`);
   console.log(`   Keywords: "${keywords}"`);
 
-  const isNature = isNatureTopic(keywords);
-  let suggestedKeyword = keywords;
-  let attempt = 0;
+  let currentKeywords = keywords;
+  const failedKeywords: string[] = []; // Track what didn't work
 
-  // ATTEMPT 1: Wikimedia with original keywords
-  attempt++;
-  console.log(`\n   🔍 Attempt ${attempt}: Wikimedia (${keywords})`);
-  const wiki1 = await fetchFromWikimedia(keywords, 5);
+  // Up to 4 attempts (original + 3 retries with AI-suggested keywords)
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    console.log(`\n   🔍 Attempt ${attempt}: (${currentKeywords})`);
 
-  if (wiki1.length > 0) {
-    const result = await analyzeImagesWithAI(wiki1, wiki1, slideTitle, slideContext, keywords, true);
-    if (result.selectedUrl) {
-      console.log(`   ✅ Selected from Wikimedia attempt 1`);
-      return result.selectedUrl;
-    }
-    if (result.suggestedKeyword) {
-      suggestedKeyword = result.suggestedKeyword;
-      console.log(`   💡 AI suggests: "${suggestedKeyword}"`);
-    }
-  }
 
-  // For NATURE topics: Try Pixabay immediately after first Wikimedia failure
-  if (isNature) {
-    attempt++;
-    console.log(`\n   � Attempt ${attempt}: Pixabay for nature topic (${keywords})`);
-    const pixabay1 = await fetchFromPixabay(keywords, 3);
+    // PARALLEL fetch from both sources
+    // NOTE: Pixabay disabled - using only Wikimedia for more accurate images
+    const wikiImages = await fetchFromWikimedia(currentKeywords, 5);
 
-    if (pixabay1.length > 0) {
-      const result = await analyzeImagesWithAI(
-        pixabay1.map(p => p.analysisUrl),
-        pixabay1.map(p => p.displayUrl),
-        slideTitle, slideContext, keywords, true
-      );
-      if (result.selectedUrl) {
-        console.log(`   ✅ Selected from Pixabay (nature topic)`);
-        return result.selectedUrl;
+    // All candidates from Wikimedia only
+    const allImages: DualImage[] = [...wikiImages];
+    console.log(`   📋 Total candidates: ${allImages.length} (Wikimedia only)`);
+
+    if (allImages.length === 0) {
+      console.log(`   ⚠️ No images found for "${currentKeywords}"`);
+      failedKeywords.push(currentKeywords);
+
+      // Ask AI to suggest alternative keywords (with context of what already failed)
+      if (attempt < 4) {
+        try {
+          const failedList = failedKeywords.join('", "');
+          const suggestionResponse = await ai.models.generateContent({
+            model: MODELS.CONSULTANT,
+            contents: `Finding images from Wikimedia Commons for: ${slideTitle}
+Context: ${slideContext.slice(0, 200)}
+
+FAILED SEARCHES (returned 0 results): "${failedList}"
+
+These keywords didn't work. Suggest ONE different search phrase (2-4 words, no commas).
+Try a more specific real object, historical photo, or well-known visual.
+Reply with ONLY the search phrase, nothing else.`,
+            config: { thinkingConfig: { thinkingBudget: 0 } }
+          });
+          const suggestion = suggestionResponse.text?.trim();
+          if (suggestion && !failedKeywords.includes(suggestion) && !suggestion.includes(',')) {
+            console.log(`   💡 AI suggests: "${suggestion}"`);
+            currentKeywords = suggestion;
+          }
+        } catch (e) {
+          console.log(`   ⚠️ Could not get AI suggestion`);
+        }
       }
-      if (result.suggestedKeyword) {
-        suggestedKeyword = result.suggestedKeyword;
-      }
+      continue;
     }
-  }
 
-  // ATTEMPT 2: Wikimedia with alternate keyword
-  if (suggestedKeyword && suggestedKeyword !== keywords) {
-    attempt++;
-    console.log(`\n   � Attempt ${attempt}: Wikimedia (${suggestedKeyword})`);
-    const wiki2 = await fetchFromWikimedia(suggestedKeyword, 5);
-
-    if (wiki2.length > 0) {
-      const result = await analyzeImagesWithAI(wiki2, wiki2, slideTitle, slideContext, suggestedKeyword, true);
-      if (result.selectedUrl) {
-        console.log(`   ✅ Selected from Wikimedia attempt 2`);
-        return result.selectedUrl;
-      }
-      if (result.suggestedKeyword && result.suggestedKeyword !== suggestedKeyword) {
-        suggestedKeyword = result.suggestedKeyword;
-        console.log(`   💡 AI suggests: "${suggestedKeyword}"`);
-      }
-    }
-  }
-
-  // ATTEMPT 3: Wikimedia with 3rd keyword + Pixabay backup
-  attempt++;
-  console.log(`\n   🔍 Attempt ${attempt}: Wikimedia + Pixabay backup (${suggestedKeyword})`);
-
-  const [wiki3, pixabay3] = await Promise.all([
-    fetchFromWikimedia(suggestedKeyword, 5),
-    fetchFromPixabay(suggestedKeyword, 3)
-  ]);
-
-  // Try Wikimedia first
-  if (wiki3.length > 0) {
-    const result = await analyzeImagesWithAI(wiki3, wiki3, slideTitle, slideContext, suggestedKeyword, false);
-    if (result.selectedUrl) {
-      console.log(`   ✅ Selected from Wikimedia attempt 3`);
-      return result.selectedUrl;
-    }
-  }
-
-  // Try Pixabay backup
-  if (pixabay3.length > 0) {
+    // AI analysis with parallel Base64 conversion
     const result = await analyzeImagesWithAI(
-      pixabay3.map(p => p.analysisUrl),
-      pixabay3.map(p => p.displayUrl),
-      slideTitle, slideContext, suggestedKeyword, false
+      allImages,
+      slideTitle,
+      slideContext,
+      currentKeywords,
+      attempt === 1  // Allow keyword suggestion only on first attempt
     );
+
     if (result.selectedUrl) {
-      console.log(`   ✅ Selected from Pixabay backup`);
+      console.log(`   ✅ Selected image!`);
+      imageCache.set(cacheKey, result.selectedUrl);  // Cache the result
       return result.selectedUrl;
+    }
+
+    // Use AI-suggested keyword for retry
+    if (result.suggestedKeyword && result.suggestedKeyword !== currentKeywords) {
+      console.log(`   💡 Retrying with: "${result.suggestedKeyword}"`);
+      currentKeywords = result.suggestedKeyword;
+    } else {
+      break;  // No new keyword, stop retrying
     }
   }
 
-  // Final fallback: Return first available image or placeholder
-  console.log(`   ⚠️ No suitable image found, using fallback`);
-  return wiki1[0] || wiki3[0] || pixabay3[0]?.displayUrl || getPlaceholderUrl(keywords);
+  // Fallback to placeholder
+  console.log(`   ⚠️ Using placeholder`);
+  const placeholder = getPlaceholderUrl(keywords);
+  imageCache.set(cacheKey, placeholder);
+  return placeholder;
 }
 
 // ============================================
@@ -799,7 +723,9 @@ Return ONLY valid JSON.`;
       model: MODELS.CURRICULUM,
       contents: prompt,
       config: {
-        thinkingConfig: { thinkingBudget: 0 }
+        thinkingConfig: { thinkingBudget: 0 },
+        // Enable Google Search grounding for up-to-date information
+        tools: [{ googleSearch: {} }]
       }
     });
 
@@ -899,8 +825,8 @@ TEXT_BLOCK:
 { "type": "text", "content": "Your educational text here..." }
 
 IMAGE_BLOCK:
-{ "type": "image", "keywords": "elephant africa", "caption": "African elephant in savanna", "position": "hero" }
-- keywords: EXACTLY 2 words, real photographable subjects (see IMAGE KEYWORDS section)
+{ "type": "image", "keywords": "pokemon trading cards", "caption": "Pokemon card collection", "position": "hero" }
+- keywords: ONE phrase, 2-4 words, NO COMMAS (e.g. "video streaming screen" not "streaming, digital, video")
 - position: "hero" (centered) | "intro" (left-aligned at start) | "grid" (in a row)
 
 QUIZ_BLOCK (REQUIRED FIELDS - ALL MUST BE PRESENT):
@@ -957,39 +883,42 @@ ${slidesList}
 ${previousContext ? `PREVIOUS MODULES:\n${previousContext}\n` : ""}
 ${SCHEMA_DEFINITIONS}
 
-=== IMAGE KEYWORDS (CRITICAL FOR SEARCH) ===
-Keywords are used to search Wikimedia Commons. Use REAL, PHOTOGRAPHABLE subjects.
+=== WRITING APPROACH ===
+Write as if explaining to a curious friend over coffee. Each piece of information should make them lean in and want to know what comes next.
 
-✅ GOOD KEYWORDS (specific, searchable):
-- "solar panel" (not "renewable energy concept")
-- "python snake" (not "programming language")
-- "DNA helix" (not "genetics illustration")
-- "factory assembly" (not "manufacturing process")
-- "brain scan" (not "thinking concept")
-- "coffee beans" (not "morning routine")
-- "circuit board" (not "technology background")
+Avoid: "Let's explore...", "Now we'll learn...", "As we discussed..."
+Instead: Jump straight into the interesting part. Start with the detail that made YOU curious.
 
-❌ BAD KEYWORDS (abstract, unsearchable):
-- "AI concept", "digital transformation", "learning journey"
-- "success mindset", "growth illustration", "innovation idea"
-- Any word ending in: concept, illustration, abstract, background
+VARIED OPENINGS (never repeat the same pattern twice in a row):
+- A surprising fact or counter-intuitive truth
+- A "what if" or "imagine" scenario
+- A specific detail that reveals something larger
+- A contrast or paradox
+- A moment in history or a real person's experience
 
-RULE: If you can't photograph it in real life, don't use it as a keyword.
+Each slide's last paragraph should leave something unresolved or hint at something fascinating ahead - not by saying "next we'll see" but by genuinely leaving the reader wanting more.
+
+=== IMAGE KEYWORDS (CRITICAL) ===
+Include 2-3 images per content slide. Show specific, real things - not abstract concepts.
+Keywords format: ONE phrase, 2-4 words, NO COMMAS.
+
+✅ CORRECT: "video streaming laptop", "computer chip closeup", "DNA helix model"
+❌ WRONG: "concept, illustration, technology" ← HAS COMMAS
 
 === SLIDE STRUCTURE (${totalSlides} SLIDES TOTAL) ===
 
 **SLIDE 1: "${moduleTitle}" (MODULE INTRO)**
-A welcoming introduction slide with:
-- One hero image representing the module topic
-- Text explaining what this module will cover
-- Why it matters and what the learner will gain
+- One hero image that captures the essence
+- Open with the most intriguing aspect of this topic
+- Make the reader feel like they're about to discover something worth knowing
 
 **SLIDES 2-${slideTitles.length + 1}: CONTENT SLIDES**
 ${slidesList}
-Each content slide should have:
-- 2-4 text blocks with educational content
-- 1-2 images with position "hero" or "intro"
+Each content slide:
+- 2-4 text blocks (mix of explanation, examples, and specific details)
+- 2-3 images showing real objects/scenes mentioned in text
 - Optional: 1 fun_fact, quiz, or table per 2 slides
+- End each slide with something that naturally pulls toward the next topic
 
 **SLIDE ${slideTitles.length + 2}: "Notes & Summary"**
 Single block: notes_summary with summary paragraph + 6-10 bullet points
@@ -1045,7 +974,9 @@ Generate exactly ${totalSlides} slides. Return ONLY valid JSON.`;
       model: MODELS.CONTENT,
       contents: prompt,
       config: {
-        thinkingConfig: { thinkingBudget: 0 }
+        thinkingConfig: { thinkingBudget: 0 },
+        // Enable Google Search grounding for up-to-date information
+        tools: [{ googleSearch: {} }]
       }
     });
 
@@ -1171,61 +1102,52 @@ export async function generateSpeech(text: string): Promise<string> {
 // 4. CONSULTANT & CHAT
 // ============================================
 
+/**
+ * Generate consultant reply with streaming support.
+ * AI decides when to trigger curriculum generation (no hardcoded phrases).
+ */
 export async function generateConsultantReply(
   history: { role: string; parts: { text: string }[] }[],
   message: string,
-  isInitialMessage = false
+  isInitialMessage = false,
+  onStream?: (chunk: string) => void
 ): Promise<ConsultantResult> {
   const turnCount = history.length;
 
-  // Check if user is confirming curriculum generation
-  const lowerMessage = message.toLowerCase();
-  const confirmationPhrases = ['yes', 'sure', 'go ahead', 'generate', 'create it', 'create the', 'okay', 'ok', 'yep', 'yeah', 'let\'s go', 'do it', 'sounds good', 'perfect', 'ready', 'go for it', 'make it', 'start', 'yo', 'cool'];
-  const isConfirmation = confirmationPhrases.some(phrase => lowerMessage.includes(phrase));
+  // Consultant prompt - AI decides when ready to generate
+  const systemPrompt = `You are a friendly curriculum consultant helping users figure out what they want to learn.
 
-  // If we previously asked for permission and user confirms
-  const lastModelMessage = history.filter(h => h.role === 'model').pop()?.parts[0]?.text || '';
-  const askedPermission = lastModelMessage.toLowerCase().includes('shall i') ||
-                          lastModelMessage.toLowerCase().includes('want me to') ||
-                          lastModelMessage.toLowerCase().includes('ready to generate') ||
-                          lastModelMessage.toLowerCase().includes('create your curriculum');
+=== YOUR STYLE ===
+- Brief and natural (1-3 sentences usually)
+- Ask clarifying questions only when needed
+- When you understand their needs, offer to create their curriculum
 
-  if (isConfirmation && askedPermission) {
-    return {
-      text: "", // No text - triggers curriculum generation
-      shouldGenerateCurriculum: true
-    };
+=== RESPONSE FORMAT ===
+You MUST respond in valid JSON:
+{
+  "message": "Your natural response to the user",
+  "ready_to_generate": false
+}
+
+When the user confirms they want the curriculum generated (yes, sure, ok, etc.) OR when you feel ready and they agree:
+{
+  "message": "Great! Let me create that for you.",
+  "ready_to_generate": true,
+  "context": {
+    "topic": "Main topic they want to learn",
+    "interests": ["specific subtopics or aspects they mentioned"],
+    "level": "beginner/intermediate/advanced (based on conversation)",
+    "goals": "What they want to achieve with this knowledge"
   }
-
-  // Simple, natural consultant prompt
-  const systemPrompt = `You are a professional learning and curicculum consultant. Help the user figure out what they want to learn.
-
-=== HOW TO TALK ===
-- Talk normally, like a helpful friend
-- Keep it brief (1-3 sentences usually)
-- Don't be over-enthusiastic or theatrical
-- If they're vague, ask one simple question to clarify
-- If you have enough info, offer to create their curriculum
+}
 
 ${isInitialMessage ? `
-User said: "${message}"
-Respond naturally. You might ask what aspect interests them, or what they're hoping to do with this knowledge.
-` : turnCount < 6 ? `
-Continue the conversation. When you understand roughly what they want, offer to generate their curriculum.
-Don't interrogate - one question at a time, and only if needed.
+This is their first message. Respond warmly and ask what specifically interests them about this topic.
+` : turnCount < 8 ? `
+Continue naturally. Only set ready_to_generate: true when they explicitly confirm.
 ` : `
-You've chatted enough. Summarize and offer to create the curriculum.
-`}
-
-=== WHEN READY ===
-When offering to generate, use phrases like:
-- "Shall I put together a curriculum for you?"
-- "Want me to create your learning path?"
-- "Ready to generate it?"
-
-Keep it natural and conversational.`;
-
-
+You've been chatting a while. Summarize and offer to generate.
+`}`;
 
   const contents = [
     { role: "user", parts: [{ text: systemPrompt }] },
@@ -1233,18 +1155,66 @@ Keep it natural and conversational.`;
     { role: "user", parts: [{ text: message }] }
   ];
 
-  const response = await ai.models.generateContent({
-    model: MODELS.CONSULTANT,
-    contents,
-    config: {}
-  });
+  try {
+    // Use streaming if callback provided
+    if (onStream) {
+      let fullText = '';
 
-  let text = response.text || "";
+      const streamResponse = await ai.models.generateContentStream({
+        model: MODELS.CONSULTANT,
+        contents,
+        config: {}
+      });
 
-  // Strip any markdown formatting the model might still use
-  text = text.replace(/\*\*/g, '').replace(/\*/g, '').replace(/_/g, '').replace(/^[-•]\s*/gm, '').trim();
+      for await (const chunk of streamResponse) {
+        const chunkText = chunk.text || '';
+        fullText += chunkText;
+        onStream(chunkText);
+      }
 
-  return { text, shouldGenerateCurriculum: false };
+      return parseConsultantResponse(fullText);
+    } else {
+      // Non-streaming fallback
+      const response = await ai.models.generateContent({
+        model: MODELS.CONSULTANT,
+        contents,
+        config: {}
+      });
+
+      return parseConsultantResponse(response.text || '');
+    }
+  } catch (e) {
+    console.error('Consultant error:', e);
+    return { text: "Sorry, I had trouble responding. Could you try again?", shouldGenerateCurriculum: false };
+  }
+}
+
+/** Parse JSON response from consultant */
+function parseConsultantResponse(rawText: string): ConsultantResult {
+  try {
+    // Try to extract JSON from response
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+
+      return {
+        text: parsed.message || parsed.response || rawText,
+        shouldGenerateCurriculum: parsed.ready_to_generate === true,
+        curriculumContext: parsed.context ? {
+          topic: parsed.context.topic || '',
+          interests: parsed.context.interests,
+          knowledgeLevel: parsed.context.level,
+          goals: parsed.context.goals
+        } : undefined
+      };
+    }
+  } catch (e) {
+    // JSON parsing failed, use raw text
+  }
+
+  // Fallback: return raw text as message
+  const cleanText = rawText.replace(/\*\*/g, '').replace(/\*/g, '').replace(/_/g, '').trim();
+  return { text: cleanText, shouldGenerateCurriculum: false };
 }
 
 export async function generateChatResponse(
@@ -1336,3 +1306,182 @@ Return ONLY valid JSON.`;
     };
   }
 }
+
+// ============================================
+// 6. TEXT-TO-SPEECH GENERATION
+// ============================================
+
+/** Extract readable text from a slide's blocks for TTS */
+function extractTextFromSlide(slide: { title: string; blocks: any[] }): string {
+  const parts: string[] = [slide.title];
+
+  for (const block of slide.blocks) {
+    switch (block.type) {
+      case 'text':
+        parts.push(block.content);
+        break;
+      case 'fun_fact':
+        parts.push(`Here's an interesting fact: ${block.fact}`);
+        break;
+      case 'notes_summary':
+        if (block.summary) parts.push(block.summary);
+        if (block.points?.length) {
+          parts.push('Key points to remember:');
+          parts.push(...block.points);
+        }
+        break;
+      case 'image':
+        if (block.caption) parts.push(block.caption);
+        break;
+      // Skip quiz, fill_blank, and other interactive blocks for TTS
+    }
+  }
+
+  return parts.join('. ').replace(/\.\./g, '.').slice(0, 5000); // Limit to 5000 chars
+}
+
+/** Convert WAV options from MIME type */
+interface WavOptions {
+  numChannels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+}
+
+function parseMimeType(mimeType: string): WavOptions {
+  const [fileType, ...params] = mimeType.split(';').map(s => s.trim());
+  const [, format] = fileType.split('/');
+
+  const options: Partial<WavOptions> = { numChannels: 1 };
+
+  if (format && format.startsWith('L')) {
+    const bits = parseInt(format.slice(1), 10);
+    if (!isNaN(bits)) options.bitsPerSample = bits;
+  }
+
+  for (const param of params) {
+    const [key, value] = param.split('=').map(s => s.trim());
+    if (key === 'rate') options.sampleRate = parseInt(value, 10);
+  }
+
+  return options as WavOptions;
+}
+
+/** Create WAV header for raw audio data */
+function createWavHeader(dataLength: number, options: WavOptions): Uint8Array {
+  const { numChannels, sampleRate, bitsPerSample } = options;
+  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const buffer = new ArrayBuffer(44);
+  const view = new DataView(buffer);
+
+  // RIFF header
+  new TextEncoder().encode('RIFF').forEach((b, i) => view.setUint8(i, b));
+  view.setUint32(4, 36 + dataLength, true);
+  new TextEncoder().encode('WAVE').forEach((b, i) => view.setUint8(8 + i, b));
+
+  // fmt subchunk
+  new TextEncoder().encode('fmt ').forEach((b, i) => view.setUint8(12 + i, b));
+  view.setUint32(16, 16, true); // Subchunk1Size
+  view.setUint16(20, 1, true);  // AudioFormat (PCM)
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+
+  // data subchunk
+  new TextEncoder().encode('data').forEach((b, i) => view.setUint8(36 + i, b));
+  view.setUint32(40, dataLength, true);
+
+  return new Uint8Array(buffer);
+}
+
+/** Convert base64 audio data to WAV blob URL */
+function convertToWavBlobUrl(rawData: string, mimeType: string): string {
+  const options = parseMimeType(mimeType);
+  const rawBytes = Uint8Array.from(atob(rawData), c => c.charCodeAt(0));
+  const wavHeader = createWavHeader(rawBytes.length, options);
+
+  const wavData = new Uint8Array(wavHeader.length + rawBytes.length);
+  wavData.set(wavHeader, 0);
+  wavData.set(rawBytes, wavHeader.length);
+
+  const blob = new Blob([wavData], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
+}
+
+/** Generate TTS audio for a single slide */
+export async function generateTTSForSlide(
+  slide: { title: string; blocks: any[] }
+): Promise<string | null> {
+  // Skip if TTS is disabled
+  if (!TTS_ENABLED) return null;
+
+  const text = extractTextFromSlide(slide);
+  if (!text || text.length < 10) return null;
+
+  console.log(`🔊 Generating TTS for: "${slide.title.slice(0, 40)}..."`);
+
+  try {
+    const response = await ai.models.generateContentStream({
+      model: MODELS.TTS,
+      config: {
+        responseModalities: ['audio'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: 'Charon'
+            }
+          }
+        }
+      },
+      contents: [{ role: 'user', parts: [{ text }] }]
+    });
+
+    // Collect all audio chunks
+    const audioChunks: string[] = [];
+    let mimeType = 'audio/L16;rate=24000';
+
+    for await (const chunk of response) {
+      const inlineData = chunk.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (inlineData?.data) {
+        audioChunks.push(inlineData.data);
+        if (inlineData.mimeType) mimeType = inlineData.mimeType;
+      }
+    }
+
+    if (audioChunks.length === 0) {
+      console.warn(`   ⚠️ No audio generated for: ${slide.title}`);
+      return null;
+    }
+
+    // Combine all chunks and convert to WAV blob URL
+    const combinedData = audioChunks.join('');
+    const blobUrl = convertToWavBlobUrl(combinedData, mimeType);
+    console.log(`   ✅ TTS ready for: ${slide.title.slice(0, 30)}...`);
+    return blobUrl;
+
+  } catch (error) {
+    console.error(`TTS generation failed for ${slide.title}:`, error);
+    return null;
+  }
+}
+
+/** Generate TTS for all slides in a module (parallel) */
+export async function generateTTSForModule(
+  slides: { title: string; blocks: any[] }[]
+): Promise<(string | null)[]> {
+  console.log(`🔊 Generating TTS for ${slides.length} slides...`);
+  const startTime = performance.now();
+
+  const results = await Promise.all(
+    slides.map(slide => generateTTSForSlide(slide))
+  );
+
+  const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
+  const successCount = results.filter(r => r !== null).length;
+  console.log(`✅ TTS complete: ${successCount}/${slides.length} slides (${elapsed}s)`);
+
+  return results;
+}
+

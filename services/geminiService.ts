@@ -1,26 +1,30 @@
 /**
- * OmniLearn AI - Gemini Service
+ * KnowMore - Gemini Service
  * Clean, modular service for AI-powered curriculum and content generation
  */
 
 import { GoogleGenAI, Type } from "@google/genai";
+import {
+  API_CONFIG,
+  AI_MODELS,
+  RATE_LIMITS,
+  IMAGE_CONFIG,
+  CONVERSATION_CONFIG,
+  NATURE_KEYWORDS
+} from "../constants/config";
+import type {
+  CurriculumData,
+  CurriculumModule,
+  CurriculumSlide,
+  ContentBlock,
+  Slide
+} from "../types";
 
 // ============================================
 // CONFIGURATION
 // ============================================
-const API_KEY = process.env.API_KEY || "";
-const PIXABAY_KEY = "53631556-267a3b1b6dca0533d6b8fe2fa";
-
-// Model configuration - customize models for each role
-const MODELS = {
-  CONSULTANT: "gemini-robotics-er-1.5-preview",       // Pre-curriculum chat
-  CURRICULUM: "gemini-robotics-er-1.5-preview",       // Curriculum structure generation
-  CONTENT: "gemini-robotics-er-1.5-preview", //gemini-robotics-er-1.5-preview,          // Slide content generation
-  CHAT: "gemma-3-27b-it",             // Learning view chat assistant
-  IMAGE_ANALYSIS: "gemma-3-27b-it",   // Image selection
-  ANSWER_EVAL: "gemma-3-12b-it",      // User answer evaluation
-  TTS: "gemini-2.5-flash-preview-tts" // Text-to-speech
-};
+const MODELS = AI_MODELS;
+const PIXABAY_KEY = API_CONFIG.PIXABAY_API_KEY || "53631556-267a3b1b6dca0533d6b8fe2fa";
 
 // Toggle TTS generation on/off (set to false to disable TTS and save API calls)
 export const TTS_ENABLED = false;
@@ -28,19 +32,17 @@ export const TTS_ENABLED = false;
 // Toggle Live Voice chat in Consultant (set to false to hide mic button while unstable)
 export const LIVE_VOICE_ENABLED = true;
 
+const ai = new GoogleGenAI({ apiKey: API_CONFIG.GEMINI_API_KEY });
 
-const ai = new GoogleGenAI({ apiKey: API_KEY });
-
-// Rate limiting for AI image analysis calls (20 per minute = 3s between calls)
+// Rate limiting for AI image analysis calls
 let lastImageAnalysisTime = 0;
-const MIN_ANALYSIS_INTERVAL_MS = 3000; // 3 seconds = 20 per minute
 
 async function rateLimitImageAnalysis(): Promise<void> {
   const now = Date.now();
   const timeSinceLastCall = now - lastImageAnalysisTime;
 
-  if (timeSinceLastCall < MIN_ANALYSIS_INTERVAL_MS) {
-    const waitTime = MIN_ANALYSIS_INTERVAL_MS - timeSinceLastCall;
+  if (timeSinceLastCall < RATE_LIMITS.IMAGE_ANALYSIS_INTERVAL_MS) {
+    const waitTime = RATE_LIMITS.IMAGE_ANALYSIS_INTERVAL_MS - timeSinceLastCall;
     console.log(`      ⏳ Rate limit: waiting ${(waitTime/1000).toFixed(1)}s`);
     await new Promise(r => setTimeout(r, waitTime));
   }
@@ -48,36 +50,12 @@ async function rateLimitImageAnalysis(): Promise<void> {
   lastImageAnalysisTime = Date.now();
 }
 
-// Nature/wildlife keywords that work better with Pixabay
-const NATURE_KEYWORDS = ['nature', 'wildlife', 'animal', 'forest', 'ocean', 'mountain', 'landscape', 'flower', 'bird', 'tree', 'sunset', 'sky'];
-
 // ============================================
-// TYPES
+// SERVICE-SPECIFIC TYPES (re-export from types.ts)
 // ============================================
+export type { CurriculumData, CurriculumModule, CurriculumSlide } from "../types";
 
-// Curriculum types
-export interface CurriculumSlide {
-  id: string;
-  title: string;
-  description: string;
-}
-
-export interface CurriculumModule {
-  id: string;
-  title: string;
-  description: string;
-  slides: CurriculumSlide[];
-}
-
-export interface CurriculumData {
-  title: string;
-  overview: string;
-  learningGoals: string[];
-  description: string;
-  modules: CurriculumModule[];
-}
-
-// Slide content types - matches ContentBlock in types.ts
+// Service-specific types not in types.ts
 export interface SlideBlock {
   type: "text" | "image" | "quiz" | "fun_fact" | "table"
       | "fill_blank" | "short_answer" | "assertion_reason"
@@ -86,26 +64,25 @@ export interface SlideBlock {
   content?: string;
   keywords?: string;
   caption?: string;
-  imageUrl?: string | null;  // null = loading in progress
+  imageUrl?: string | null;
   position?: "hero" | "intro" | "grid";
   question?: string;
   options?: { text: string; isCorrect: boolean }[];
   explanation?: string;
   fact?: string;
   markdown?: string;
-  // New fields for Exercise blocks
-  sentence?: string;         // fill_blank
-  answer?: string;           // fill_blank, image_recognition
-  expectedAnswer?: string;   // short_answer
-  assertion?: string;        // assertion_reason
-  reason?: string;           // assertion_reason
-  correctOption?: string;    // assertion_reason
-  pairs?: { left: string; right: string }[];  // match_following
-  imageKeywords?: string;    // image_recognition
-  prompt?: string;           // reflection
-  instruction?: string;      // activity
-  points?: string[];         // notes_summary
-  summary?: string;          // notes_summary - summary paragraph
+  sentence?: string;
+  answer?: string;
+  expectedAnswer?: string;
+  assertion?: string;
+  reason?: string;
+  correctOption?: string;
+  pairs?: { left: string; right: string }[];
+  imageKeywords?: string;
+  prompt?: string;
+  instruction?: string;
+  points?: string[];
+  summary?: string;
 }
 
 export interface SlideData {
@@ -444,16 +421,20 @@ Keywords: "${keywords}"
 
     if (allowKeywordSuggestion) {
       contents.push({
-        text: `\nWhich image best represents "${slideTitle}"?
-RESPOND:
-DECISION: SELECTED or NONE
-SELECTED_NUMBER: [1-${validParts.length}] or 0
-ALT_KEYWORD: [if NONE, 3-5 word search term]`
+        text: `\nWhich image best matches "${slideTitle}"?
+Current search: "${keywords}"
+
+RESPOND WITH ONLY ONE OF:
+• A number (1-${validParts.length}) - pick the most relevant image for the topic/slide/keyword
+• "NONE: [different 2-4 word search term]" - ONLY if nothing is remotely relevant
+
+IMPORTANT: If you say NONE, you must suggest a DIFFERENT keyword than "${keywords}".
+Good examples: "atom diagram", "neural network visualization", "database schema"
+DO NOT repeat the current keyword. DO NOT explain. Just number or NONE with new keyword.`
       });
     } else {
       contents.push({
-        text: `\nPick the best image (even if imperfect).
-SELECTED: [number]`
+        text: `\nBest image? Reply with ONLY a number (1-${validParts.length}):`
       });
     }
 
@@ -464,30 +445,37 @@ SELECTED: [number]`
       contents: contents
     });
 
-    const responseText = response.text || "";
-    console.log(`      📝 AI: ${responseText.split('\n')[0]}`);
+    const responseText = response.text?.trim() || "";
+    console.log(`      📝 AI: ${responseText}`);
 
-    // Parse response
+    // Parse simplified response
     if (allowKeywordSuggestion) {
-      const decisionMatch = responseText.match(/DECISION:\s*(SELECTED|NONE)/i);
-      const selectedMatch = responseText.match(/SELECTED_NUMBER:\s*(\d+)/i);
-      const altKeywordMatch = responseText.match(/ALT_KEYWORD:\s*([^\n]+)/i);
+      // Check for "NONE: keyword" format
+      const noneMatch = responseText.match(/NONE:\s*(.+)/i);
+      if (noneMatch) {
+        const suggestedKeyword = noneMatch[1].trim().replace(/^["']+|["']+$/g, '');
+        const wordCount = suggestedKeyword.split(/\s+/).length;
 
-      if (decisionMatch?.[1]?.toUpperCase() === 'NONE') {
-        const suggestedKeyword = altKeywordMatch?.[1]?.trim()?.replace(/^["']+|["']+$/g, '');
-        if (suggestedKeyword && suggestedKeyword.length > 0 && suggestedKeyword.toLowerCase() !== 'empty') {
+        // Only accept short keywords (2-5 words, max 50 chars)
+        // Reject explanations like "None of the images..."
+        if (suggestedKeyword.length > 0 && suggestedKeyword.length <= 50 && wordCount <= 5) {
           console.log(`      🔄 No match. AI suggests: "${suggestedKeyword}"`);
           return { selectedIndex: null, suggestedKeyword };
+        } else {
+          console.log(`      ⚠️ AI gave explanation instead of keyword, using first image`);
         }
       }
 
-      const idx = selectedMatch ? parseInt(selectedMatch[1], 10) - 1 : -1;
+      // Check for number
+      const numMatch = responseText.match(/(\d+)/);
+      const idx = numMatch ? parseInt(numMatch[1], 10) - 1 : -1;
       if (idx >= 0 && idx < validParts.length) {
         console.log(`      ✅ Selected image ${idx + 1}`);
         return { selectedIndex: validParts[idx].index, selectedUrl: validParts[idx].displayUrl };
       }
     } else {
-      const match = responseText.match(/SELECTED:\s*(\d)/i);
+      // Simple number response
+      const match = responseText.match(/(\d+)/);
       const idx = match ? parseInt(match[1], 10) - 1 : 0;
       if (idx >= 0 && idx < validParts.length) {
         console.log(`      ✅ Selected image ${idx + 1}`);
@@ -545,7 +533,7 @@ export async function selectBestImage(
 
     // PARALLEL fetch from both sources
     // NOTE: Pixabay disabled - using only Wikimedia for more accurate images
-    const wikiImages = await fetchFromWikimedia(currentKeywords, 5);
+    const wikiImages = await fetchFromWikimedia(currentKeywords, IMAGE_CONFIG.WIKIMEDIA_FETCH_COUNT);
 
     // All candidates from Wikimedia only
     const allImages: DualImage[] = [...wikiImages];
@@ -811,7 +799,8 @@ export async function generateModuleContent(
   moduleDescription: string,
   slideTitles: string[],
   previousContext = "",
-  onImageReady?: (slideIndex: number, blockIndex: number, imageUrl: string) => void
+  onImageReady?: (slideIndex: number, blockIndex: number, imageUrl: string) => void,
+  skipImageSelection = false  // When true, skip auto image selection (for on-demand loading)
 ): Promise<ModuleContent> {
   console.log(`\n🎯 Generating: "${moduleTitle}" (${slideTitles.length} slides)...`);
   const startTime = performance.now();
@@ -1039,6 +1028,12 @@ Generate exactly ${totalSlides} slides. Return ONLY valid JSON.`;
       console.log(`   └─ Slide ${slideIdx + 1}: "${slide.title}" (${processedBlocks.length} blocks)`);
     }
 
+    // Skip image selection if flag is set (for on-demand loading)
+    if (skipImageSelection) {
+      console.log(`   📷 Skipping image selection (on-demand loading enabled)`);
+      return { moduleId: "", slides: processedSlides };
+    }
+
     // If no callback provided, process images synchronously (blocking mode)
     if (!onImageReady) {
       for (const imgBlock of imageBlocks) {
@@ -1154,7 +1149,8 @@ You've been chatting a while. Summarize and offer to generate.
 
   const contents = [
     { role: "user", parts: [{ text: systemPrompt }] },
-    ...history,
+    // Limit history to last MAX_HISTORY_MESSAGES to control token usage
+    ...history.slice(-CONVERSATION_CONFIG.MAX_HISTORY_MESSAGES),
     { role: "user", parts: [{ text: message }] }
   ];
 
@@ -1486,5 +1482,296 @@ export async function generateTTSForModule(
   console.log(`✅ TTS complete: ${successCount}/${slides.length} slides (${elapsed}s)`);
 
   return results;
+}
+
+// ============================================
+// ARTICLE MODE - Single scrollable article
+// ============================================
+
+interface ArticleSectionRaw {
+  id: string;
+  title: string;
+  content: string;
+  imageKeywords?: string;
+}
+
+interface ArticleRaw {
+  title: string;
+  overview: string;
+  sections: ArticleSectionRaw[];
+}
+
+/** Generate article content for a topic */
+export async function generateArticle(
+  topic: string,
+  context: string = ''
+): Promise<ArticleRaw> {
+  const prompt = `Write an engaging, educational article about "${topic}".
+${context ? `Context: ${context}` : ''}
+
+Write exactly 4 flowing paragraphs that read like a cohesive article (not separate sections).
+Each paragraph should:
+- Be 60-80 words
+- Flow naturally into the next
+- Explain concepts clearly with examples
+- Be engaging and educational
+
+Return as JSON:
+{
+  "title": "Engaging Article Title",
+  "overview": "One compelling sentence hook",
+  "sections": [
+    {"id": "p1", "title": "Introduction", "content": "Opening paragraph introducing the topic..."},
+    {"id": "p2", "title": "Key Concepts", "content": "Explanation with examples...", "imageKeywords": "relevant visual keyword"},
+    {"id": "p3", "title": "Deeper Exploration", "content": "More detail and context..."},
+    {"id": "p4", "title": "Conclusion", "content": "Wrapping up with key takeaways..."}
+  ]
+}
+
+Write like a quality blog post - engaging, clear, and educational.`;
+
+  return withRetry(async () => {
+    const result = await ai.models.generateContent({
+      model: MODELS.CONTENT,
+      contents: prompt,
+      config: {}
+    });
+
+    const json = cleanJsonResponse(result.text || '');
+    try {
+      return JSON.parse(json);
+    } catch (e) {
+      console.error('Article parse error:', result.text?.slice(0, 300));
+      throw new Error('Invalid article response');
+    }
+  }, 2, 1000);
+}
+
+/** Fetch images for article sections */
+export async function fetchArticleImages(
+  sections: ArticleSectionRaw[]
+): Promise<{ [sectionId: string]: string | null }> {
+  const imageMap: { [sectionId: string]: string | null } = {};
+
+  const sectionsWithImages = sections.filter(s => s.imageKeywords);
+
+  await Promise.all(
+    sectionsWithImages.map(async (section) => {
+      if (section.imageKeywords) {
+        const url = await selectBestImage(section.imageKeywords, `Educational image for article section: ${section.title}`);
+        imageMap[section.id] = url;
+      }
+    })
+  );
+
+  return imageMap;
+}
+
+// ============================================
+// PRESENTATION MODE - Slides with voice
+// ============================================
+
+interface PresentationSlideRaw {
+  id: string;
+  title: string;
+  points: string[];
+  imageKeywords: string;  // Single keyword for 1 image per slide
+  speakerNotes: string;
+}
+
+interface PresentationRaw {
+  title: string;
+  totalSlides: number;
+  slides: PresentationSlideRaw[];
+}
+
+/** Generate presentation with all slides at once */
+export async function generatePresentation(
+  topic: string,
+  context: string = ''
+): Promise<PresentationRaw> {
+  const prompt = `Create an educational 10-slide presentation about "${topic}".
+${context ? `Context: ${context}` : ''}
+
+Each slide needs:
+- A clear, descriptive title
+- 3-4 bullet points that are EXPLANATORY (12-20 words each, like a real presentation)
+- UNIQUE imageKeywords for each slide (specific to that slide's content, different per slide)
+- speakerNotes with 2-3 sentences explaining the slide content conversationally
+
+Return JSON:
+{
+  "title": "Presentation Title",
+  "totalSlides": 10,
+  "slides": [
+    {"id": "slide-1", "title": "Intro Title", "points": ["Detailed point 1 with explanation", "Detailed point 2 with context"], "imageKeywords": "specific unique keyword for this slide", "speakerNotes": "Two to three sentences that explain this slide conversationally..."}
+  ]
+}
+
+IMPORTANT: Each slide's imageKeywords MUST be different and specific to that slide's topic.`;
+
+  return withRetry(async () => {
+    const result = await ai.models.generateContent({
+      model: MODELS.CONTENT,
+      contents: prompt,
+      config: {}
+    });
+
+    const json = cleanJsonResponse(result.text || '');
+    try {
+      const data = JSON.parse(json);
+      if (!data.slides) data.slides = [];
+      data.totalSlides = data.slides.length;
+      return data;
+    } catch (e) {
+      console.error('Presentation parse error:', result.text?.slice(0, 300));
+      throw new Error('Invalid presentation response');
+    }
+  }, 2, 1000);
+}
+
+/** Generate a single presentation slide on demand */
+export async function generatePresentationSlide(
+  topic: string,
+  slideIndex: number,
+  totalSlides: number,
+  previousSlides: PresentationSlideRaw[]
+): Promise<PresentationSlideRaw> {
+  const prevContext = previousSlides.slice(-2).map(s => `- ${s.title}: ${s.points.slice(0, 2).join(', ')}`).join('\n');
+
+  const prompt = `Generate slide ${slideIndex + 1} of ${totalSlides} for a presentation about "${topic}".
+
+Previous slides covered:
+${prevContext || 'This is the first content slide'}
+
+Return JSON for ONE slide:
+{"id": "slide-${slideIndex + 1}", "title": "Slide Title", "points": ["Point 1", "Point 2", "Point 3", "Point 4"], "imageKeywords": ["keyword1", "keyword2"], "speakerNotes": "Notes..."}`;
+
+  return withRetry(async () => {
+    const result = await ai.models.generateContent({
+      model: MODELS.CONTENT,
+      contents: prompt,
+      config: {}
+    });
+
+    const json = cleanJsonResponse(result.text || '');
+    return JSON.parse(json);
+  }, 2, 1000);
+}
+
+/** Fetch images for presentation slides (1 per slide) */
+export async function fetchPresentationImages(
+  slides: PresentationSlideRaw[]
+): Promise<{ [slideId: string]: (string | null)[] }> {
+  const imageMap: { [slideId: string]: (string | null)[] } = {};
+
+  await Promise.all(
+    slides.map(async (slide) => {
+      if (slide.imageKeywords) {
+        const url = await selectBestImage(slide.imageKeywords, `Visual for: ${slide.title}`);
+        imageMap[slide.id] = [url];
+      } else {
+        imageMap[slide.id] = [];
+      }
+    })
+  );
+
+  return imageMap;
+}
+
+// ============================================
+// ON-DEMAND IMAGE SELECTION FOR MODULES
+// ============================================
+
+/**
+ * Image block info for on-demand selection
+ */
+export interface ImageBlockInfo {
+  slideIndex: number;
+  blockIndex: number;
+  keywords: string;
+  slideTitle: string;
+  slideContext: string;
+}
+
+/**
+ * Extract all image blocks from a module's slides that need image selection.
+ * Returns array of image block metadata for processing.
+ */
+export function extractImageBlocksFromModule(
+  slides: SlideData[]
+): ImageBlockInfo[] {
+  const imageBlocks: ImageBlockInfo[] = [];
+
+  slides.forEach((slide, slideIdx) => {
+    const slideContext = slide.blocks
+      .filter(b => b.type === 'text')
+      .map(b => b.content || '')
+      .join(' ')
+      .slice(0, 200);
+
+    slide.blocks.forEach((block, blockIdx) => {
+      if (block.type === 'image' && block.keywords && !block.imageUrl) {
+        imageBlocks.push({
+          slideIndex: slideIdx,
+          blockIndex: blockIdx,
+          keywords: block.keywords,
+          slideTitle: slide.title,
+          slideContext
+        });
+      }
+    });
+  });
+
+  return imageBlocks;
+}
+
+/**
+ * Select images for a module on-demand.
+ * Called when user clicks any slide in a module that hasn't had images selected yet.
+ *
+ * @param slides - The module's slides
+ * @param onImageReady - Callback fired when each image is selected
+ */
+export async function selectImagesForModule(
+  slides: SlideData[],
+  onImageReady: (slideIndex: number, blockIndex: number, imageUrl: string) => void
+): Promise<void> {
+  const imageBlocks = extractImageBlocksFromModule(slides);
+
+  if (imageBlocks.length === 0) {
+    console.log('📷 No images to select for this module');
+    return;
+  }
+
+  console.log(`\n📷 On-demand image selection: ${imageBlocks.length} images`);
+
+  for (let i = 0; i < imageBlocks.length; i++) {
+    const imgBlock = imageBlocks[i];
+
+    // Add cooldown before processing (except for first image)
+    if (i > 0) {
+      console.log(`   ⏳ Cooldown: waiting 3s before next image...`);
+      await new Promise(r => setTimeout(r, IMAGE_CONFIG.POST_SELECTION_COOLDOWN_MS));
+    }
+
+    try {
+      const imageUrl = await selectBestImage(
+        imgBlock.slideTitle,
+        imgBlock.slideContext,
+        imgBlock.keywords
+      );
+      onImageReady(imgBlock.slideIndex, imgBlock.blockIndex, imageUrl);
+    } catch (err) {
+      console.warn(`Failed to load image for slide ${imgBlock.slideIndex}:`, err);
+      onImageReady(
+        imgBlock.slideIndex,
+        imgBlock.blockIndex,
+        getPlaceholderUrl(imgBlock.keywords)
+      );
+    }
+  }
+
+  console.log('✅ Module image selection complete');
 }
 

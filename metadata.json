@@ -1,5 +1,5 @@
 {
-  "name": "OmniLearn AI",
+  "name": "KnowMore",
   "description": "A multimodal personalized learning platform powered by Gemini 3 Pro. Generate curricula, interactive slides, diagrams, and quizzes for any topic.",
   "requestFramePermissions": [
     "microphone"

@@ -1,5 +1,5 @@
 // ============================================
-// Core Types for OmniLearn AI
+// Core Types for KnowMore
 // ============================================
 
 // Chat message type
@@ -9,8 +9,11 @@ export interface ChatMessage {
   timestamp: number;
 }
 
+// Learning mode selection
+export type LearningMode = 'curriculum' | 'article' | 'presentation';
+
 // App view states
-export type ViewState = 'HOME' | 'CLARIFICATION' | 'CURRICULUM_REVIEW' | 'PLANNER' | 'LEARNING';
+export type ViewState = 'HOME' | 'CLARIFICATION' | 'CURRICULUM_REVIEW' | 'PLANNER' | 'LEARNING' | 'ARTICLE' | 'PRESENTATION';
 
 // Learning preferences for personalization
 export interface LearningPreferences {
@@ -175,4 +178,47 @@ export interface Course {
   modules: Module[];
   createdAt: number;
   lastAccessed: number;
+}
+
+// ============================================
+// Article Mode Types
+// ============================================
+
+export interface ArticleSection {
+  id: string;
+  title: string;
+  content: string;           // Paragraph content
+  imageKeywords?: string;    // For Wikimedia image fetch
+  imageUrl?: string | null;
+}
+
+export interface Article {
+  id: string;
+  topic: string;
+  title: string;
+  overview: string;
+  sections: ArticleSection[];
+  createdAt: number;
+}
+
+// ============================================
+// Presentation Mode Types
+// ============================================
+
+export interface PresentationSlide {
+  id: string;
+  title: string;
+  points: string[];          // Key points/bullet points
+  imageKeywords: string;     // Single image keyword per slide
+  imageUrls?: (string | null)[];
+  speakerNotes?: string;     // For voice intro
+}
+
+export interface Presentation {
+  id: string;
+  topic: string;
+  title: string;
+  totalSlides: number;
+  slides: PresentationSlide[];
+  createdAt: number;
 }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Course, Module, Slide, ViewState, ChatMessage, CurriculumData, LearningPreferences } from './types';
+import { Course, Module, Slide, ViewState, ChatMessage, CurriculumData, LearningPreferences, LearningMode, Article, ArticleSection, Presentation, PresentationSlide } from './types';
 import {
   generateCurriculum,
   generateModuleContent,
@@ -9,7 +9,12 @@ import {
   adjustCurriculum,
   generateTTSForModule,
   ConsultantResult,
-  LIVE_VOICE_ENABLED
+  LIVE_VOICE_ENABLED,
+  generateArticle,
+  generatePresentation,
+  fetchArticleImages,
+  fetchPresentationImages,
+  selectImagesForModule
 } from './services/geminiService';
 import { Icons } from './constants';
 import { SlideView } from './components/SlideView';
@@ -111,10 +116,25 @@ function App() {
   const [loadingText, setLoadingText] = useState('');
   const [history, setHistory] = useState<Course[]>([]);
 
+  // Learning mode selection
+  const [learningMode, setLearningMode] = useState<LearningMode>('curriculum');
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+
+  // Article mode state
+  const [article, setArticle] = useState<Article | null>(null);
+
+  // Presentation mode state
+  const [presentation, setPresentation] = useState<Presentation | null>(null);
+  const [activePresentationSlide, setActivePresentationSlide] = useState(0);
+
   // Navigation
   const [activeModuleIndex, setActiveModuleIndex] = useState(0);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
   const [isGeneratingModule, setIsGeneratingModule] = useState(false);
+
+  // On-demand image selection tracking
+  // Tracks which modules have had their images selected
+  const [imagesSelectedForModule, setImagesSelectedForModule] = useState<boolean[]>([]);
 
   // UI Panels State
   const [showHistorySidebar, setShowHistorySidebar] = useState(true);
@@ -160,24 +180,21 @@ YOUR TASK: Start with an engaging, brief greeting that shows excitement about wh
     .map(m => `${m.role === 'user' ? 'User' : 'Consultant'}: ${m.text}`)
     .join('\n');
 
-  // Voice chat for Consultant View - with exploration context and trigger detection
+  // Voice chat for Consultant View - with exploration context and function calling
   const consultantVoice = useGeminiLive({
     onMessage: (msg) => {
       setClarificationMessages(prev => [...prev, { role: msg.role, text: msg.text, timestamp: Date.now() }]);
     },
-    onModelResponse: (text) => {
-      // Check if AI suggested creating a curriculum
-      const lowerText = text.toLowerCase();
-      if (lowerText.includes('create') && (lowerText.includes('curriculum') || lowerText.includes('course') || lowerText.includes('learning path'))) {
-        console.log('🎯 Curriculum trigger detected in voice response');
-        // Stop voice chat and trigger curriculum generation
-        consultantVoice.stop();
-        setTimeout(() => {
-          if (!isLoading && clarificationMessages.length >= 2) {
-            handleGenerateFromChat();
-          }
-        }, 1000);
-      }
+    // Called when model invokes the request_curriculum_generation function
+    onGenerateCurriculum: () => {
+      console.log('🎯 Curriculum generation requested via function call');
+      // Stop voice chat and trigger curriculum generation
+      consultantVoice.stop();
+      setTimeout(() => {
+        if (!isLoading && clarificationMessages.length >= 2) {
+          handleGenerateFromChat();
+        }
+      }, 500);
     },
     initialContext: conversationContextForVoice
       ? `[CONTEXT: You are a friendly learning consultant continuing a conversation about what the user wants to learn.
@@ -185,13 +202,13 @@ YOUR TASK: Start with an engaging, brief greeting that shows excitement about wh
 CONVERSATION SO FAR:
 ${conversationContextForVoice}
 
-YOUR TASK: Continue this natural conversation to help the user clarify what they want to learn. When you feel you have enough information, suggest creating a personalized curriculum. Say something like "I can create a curriculum for you now!" Keep responses conversational and brief since this is voice chat.]`
+YOUR TASK: Continue this natural conversation to help the user clarify what they want to learn. When you feel you have enough information, offer to create a personalized curriculum. If the user agrees (says yes, sure, ok, go ahead, create it, etc.), call the request_curriculum_generation function. Keep responses conversational and brief since this is voice chat.]`
       : `[CONTEXT: You are a friendly learning consultant. Start by warmly greeting the user and asking what they'd like to learn about today. Ask follow-up questions to understand:
 - What topic interests them
 - Their current knowledge level
 - What they want to achieve
 
-When you feel you have enough information, suggest creating a personalized curriculum. Say something like "I can create a curriculum for you now!" Keep responses conversational and brief since this is voice chat.]`
+When you feel you have enough information, offer to create a personalized curriculum. ONLY call the request_curriculum_generation function when the user explicitly agrees or asks you to create it. Keep responses conversational and brief since this is voice chat.]`
   });
 
   const clarificationEndRef = useRef<HTMLDivElement>(null);
@@ -232,6 +249,21 @@ When you feel you have enough information, suggest creating a personalized curri
       contentScrollRef.current.scrollTop = 0;
     }
   }, [view, activeModuleIndex, activeSlideIndex]);
+
+  // Auto-start voice for presentation mode with slide context
+  useEffect(() => {
+    if (view === 'PRESENTATION' && presentation && LIVE_VOICE_ENABLED) {
+      const currentSlide = presentation.slides[activePresentationSlide];
+      if (currentSlide) {
+        // Start voice with slide context after a brief delay
+        setTimeout(() => {
+          // Note: The voice chat will pick up the presentation context from props
+          // For now just auto-start it
+          // learningVoice.start() would be called if we had the hook at this level
+        }, 800);
+      }
+    }
+  }, [view, presentation, activePresentationSlide]);
 
   // On-demand TTS generation when switching modules
   useEffect(() => {
@@ -277,36 +309,113 @@ When you feel you have enough information, suggest creating a personalized curri
   const handleInitialSubmit = async () => {
     if (!topic.trim()) return;
 
+    // Chat mode for ALL learning modes - go to CLARIFICATION first
     if (isChatMode) {
-      // Chat mode: Start consultation
       setView('CLARIFICATION');
       const initialMsg: ChatMessage = { role: 'user', text: topic, timestamp: Date.now() };
       setClarificationMessages([initialMsg]);
-      setIsConsulting(true);
 
+      if (LIVE_VOICE_ENABLED) {
+        setTimeout(() => consultantVoice.start(), 500);
+      } else {
+        setIsConsulting(true);
+        try {
+          const result = await generateConsultantReply([], topic, true);
+          setClarificationMessages(prev => [...prev, {
+            role: 'model',
+            text: result.text,
+            timestamp: Date.now()
+          }]);
+
+          if (result.shouldGenerateCurriculum) {
+            await handleGenerateFromChat(result.curriculumContext);
+          }
+        } catch (e) { console.error(e); }
+        finally { setIsConsulting(false); }
+      }
+      return;
+    }
+
+    // Direct mode - generate based on learning mode
+    if (learningMode === 'article') {
+      setIsLoading(true);
+      setLoadingText('Generating article...');
       try {
-        // Note: Not using streaming for JSON responses - would show raw JSON
-        const result = await generateConsultantReply([], topic, true);
+        const articleData = await generateArticle(topic);
 
-        // Add AI response
-        setClarificationMessages(prev => [...prev, {
-          role: 'model',
-          text: result.text,
-          timestamp: Date.now()
-        }]);
+        // Open view immediately with sections (no images yet)
+        const newArticle = {
+          id: `article-${Date.now()}`,
+          topic,
+          title: articleData.title,
+          overview: articleData.overview,
+          sections: articleData.sections.map(s => ({
+            ...s,
+            imageUrl: null  // Images will load in background
+          })),
+          createdAt: Date.now()
+        };
+        setArticle(newArticle);
+        setView('ARTICLE');
+        setIsLoading(false);
+        setLoadingText('');
 
-        // Auto-start voice chat after first response (if enabled)
-        if (LIVE_VOICE_ENABLED && !result.shouldGenerateCurriculum) {
-          setTimeout(() => consultantVoice.start(), 500);
-        }
+        // Load images in background, update article as they arrive
+        fetchArticleImages(articleData.sections).then(imageMap => {
+          setArticle(prev => prev ? {
+            ...prev,
+            sections: prev.sections.map(s => ({
+              ...s,
+              imageUrl: imageMap[s.id] || null
+            }))
+          } : null);
+        });
+      } catch (e) {
+        console.error('Article generation error:', e);
+        setIsLoading(false);
+        setLoadingText('');
+      }
+    } else if (learningMode === 'presentation') {
+      setIsLoading(true);
+      setLoadingText('Creating presentation...');
+      try {
+        const presData = await generatePresentation(topic);
 
-        if (result.shouldGenerateCurriculum) {
-          await handleGenerateFromChat(result.curriculumContext);
-        }
-      } catch (e) { console.error(e); }
-      finally { setIsConsulting(false); }
+        // Open view immediately with slides (no images yet)
+        const newPresentation = {
+          id: `pres-${Date.now()}`,
+          topic,
+          title: presData.title,
+          totalSlides: presData.totalSlides || presData.slides.length,
+          slides: presData.slides.map(s => ({
+            ...s,
+            imageUrls: []  // Images will load in background
+          })),
+          createdAt: Date.now()
+        };
+        setPresentation(newPresentation);
+        setActivePresentationSlide(0);
+        setView('PRESENTATION');
+        setIsLoading(false);
+        setLoadingText('');
+
+        // Load images in background, update presentation as they arrive
+        fetchPresentationImages(presData.slides).then(imageMap => {
+          setPresentation(prev => prev ? {
+            ...prev,
+            slides: prev.slides.map(s => ({
+              ...s,
+              imageUrls: imageMap[s.id] || []
+            }))
+          } : null);
+        });
+      } catch (e) {
+        console.error('Presentation generation error:', e);
+        setIsLoading(false);
+        setLoadingText('');
+      }
     } else {
-      // Direct mode: Generate curriculum immediately with user preferences
+      // Curriculum mode (direct)
       await handleGenerateCurriculumOnly(topic, "", true);
     }
   };
@@ -373,7 +482,7 @@ When you feel you have enough information, suggest creating a personalized curri
   };
 
   const handleGenerateFromChat = async (context?: { topic: string; interests?: string[]; knowledgeLevel?: string; goals?: string }) => {
-    // Stop voice chat when generating curriculum
+    // Stop voice chat when generating content
     consultantVoice.stop();
 
     // Build context string from consultant's extracted info + conversation
@@ -390,7 +499,89 @@ When you feel you have enough information, suggest creating a personalized curri
       contextStr = structuredContext + '\n\n--- CONVERSATION ---\n' + contextStr;
     }
 
-    await handleGenerateCurriculumOnly(context?.topic || topic, contextStr);
+    const topicToUse = context?.topic || topic;
+
+
+    // Generate based on learning mode
+    if (learningMode === 'article') {
+      setIsLoading(true);
+      setLoadingText('Generating article...');
+      try {
+        const articleData = await generateArticle(topicToUse, contextStr);
+
+        // Open view immediately with sections (no images yet)
+        setArticle({
+          id: `article-${Date.now()}`,
+          topic: topicToUse,
+          title: articleData.title,
+          overview: articleData.overview,
+          sections: articleData.sections.map(s => ({
+            ...s,
+            imageUrl: null
+          })),
+          createdAt: Date.now()
+        });
+        setView('ARTICLE');
+        setIsLoading(false);
+        setLoadingText('');
+
+        // Load images in background
+        fetchArticleImages(articleData.sections).then(imageMap => {
+          setArticle(prev => prev ? {
+            ...prev,
+            sections: prev.sections.map(s => ({
+              ...s,
+              imageUrl: imageMap[s.id] || null
+            }))
+          } : null);
+        });
+      } catch (e) {
+        console.error('Article generation error:', e);
+        setIsLoading(false);
+        setLoadingText('');
+      }
+    } else if (learningMode === 'presentation') {
+      setIsLoading(true);
+      setLoadingText('Creating presentation...');
+      try {
+        const presData = await generatePresentation(topicToUse, contextStr);
+
+        // Open view immediately with slides (no images yet)
+        setPresentation({
+          id: `pres-${Date.now()}`,
+          topic: topicToUse,
+          title: presData.title,
+          totalSlides: presData.totalSlides || presData.slides.length,
+          slides: presData.slides.map(s => ({
+            ...s,
+            imageUrls: []
+          })),
+          createdAt: Date.now()
+        });
+        setActivePresentationSlide(0);
+        setView('PRESENTATION');
+        setIsLoading(false);
+        setLoadingText('');
+
+        // Load images in background
+        fetchPresentationImages(presData.slides).then(imageMap => {
+          setPresentation(prev => prev ? {
+            ...prev,
+            slides: prev.slides.map(s => ({
+              ...s,
+              imageUrls: imageMap[s.id] || []
+            }))
+          } : null);
+        });
+      } catch (e) {
+        console.error('Presentation generation error:', e);
+        setIsLoading(false);
+        setLoadingText('');
+      }
+    } else {
+      // Curriculum mode (default)
+      await handleGenerateCurriculumOnly(topicToUse, contextStr);
+    }
   };
 
   // ============================================
@@ -513,43 +704,8 @@ When you feel you have enough information, suggest creating a personalized curri
       // Create a ref to track the current course state for callbacks
       let currentCourse = newCourse;
 
-      // Callback to update image in course state when ready
-      // IMPORTANT: Capture MODULE_INDEX (0) in closure to prevent affecting other modules
-      const MODULE_INDEX = 0;
-      const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
-        setCourse(prevCourse => {
-          if (!prevCourse) return prevCourse;
 
-          // Update the specific image block ONLY in this module
-          const updatedModules = prevCourse.modules.map((mod, modIdx) => {
-            if (modIdx !== MODULE_INDEX) return mod; // Don't touch other modules
-
-            const updatedSlides = mod.slides.map((slide, sIdx) => {
-              if (sIdx !== slideIdx) return slide;
-
-              const updatedBlocks = slide.blocks.map((block, bIdx) => {
-                if (bIdx !== blockIdx || block.type !== 'image') return block;
-                return { ...block, imageUrl };
-              });
-
-              return { ...slide, blocks: updatedBlocks };
-            });
-
-            return { ...mod, slides: updatedSlides };
-          });
-
-          const updated = { ...prevCourse, modules: updatedModules };
-          currentCourse = updated;
-
-          // Save updated course to history to persist image URLs
-          const newHistory = [updated, ...history.filter(h => h.id !== updated.id)].slice(0, 10);
-          localStorage.setItem('omni_history', JSON.stringify(newHistory));
-
-          return updated;
-        });
-      };
-
-      // Generate Module 1 content with progressive image loading
+      // Generate Module 1 content (skip auto image selection - will be on-demand)
       const module1 = newCourse.modules[0];
       const module1Content = await generateModuleContent(
         newCourse.title,
@@ -557,10 +713,11 @@ When you feel you have enough information, suggest creating a personalized curri
         module1.description,
         module1.slides.map(s => s.title),
         "",
-        handleImageReady // Pass callback for progressive loading
+        undefined,  // No callback needed
+        true        // skipImageSelection - images loaded on-demand
       );
 
-      // Update course with Module 1 content (images will be null initially, loaded progressively)
+      // Update course with Module 1 content (images will be null initially)
       const updatedCourse: Course = {
         ...newCourse,
         modules: newCourse.modules.map((m, idx) =>
@@ -576,11 +733,40 @@ When you feel you have enough information, suggest creating a personalized curri
       setActiveModuleIndex(0);
       setActiveSlideIndex(0);
 
-      // Switch to LEARNING view immediately - images will load progressively
+      // Initialize image selection tracking for all modules
+      const initialImageTracking = new Array(updatedCourse.modules.length).fill(false);
+      initialImageTracking[0] = true; // Mark module 1 as in-progress
+      setImagesSelectedForModule(initialImageTracking);
+
+      // Switch to LEARNING view immediately
       setView('LEARNING');
       setIsLoading(false);
 
-      // Generate remaining modules in background
+      // Trigger on-demand image selection for Module 1 immediately
+      // Use the local updatedCourse reference to avoid stale state issues
+      const handleModule1ImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
+        setCourse(prevCourse => {
+          if (!prevCourse) return prevCourse;
+          const updatedModules = prevCourse.modules.map((mod, modIdx) => {
+            if (modIdx !== 0) return mod;
+            const updatedSlides = mod.slides.map((slide, sIdx) => {
+              if (sIdx !== slideIdx) return slide;
+              const updatedBlocks = slide.blocks.map((block, bIdx) => {
+                if (bIdx !== blockIdx || block.type !== 'image') return block;
+                return { ...block, imageUrl };
+              });
+              return { ...slide, blocks: updatedBlocks };
+            });
+            return { ...mod, slides: updatedSlides };
+          });
+          return { ...prevCourse, modules: updatedModules };
+        });
+      };
+
+      // Start image selection immediately using the generated slides data
+      selectImagesForModule(module1Content.slides as any, handleModule1ImageReady);
+
+      // Generate remaining modules in background (with skipImageSelection)
       generateRemainingModules(updatedCourse, 1);
 
       // Generate TTS for Module 1 in background (don't await)
@@ -614,48 +800,14 @@ When you feel you have enough information, suggest creating a personalized curri
           await new Promise(r => setTimeout(r, 5000));
         }
 
-        // Callback for progressive loading of this specific module
-        const MODULE_INDEX = i;
-        const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
-          setCourse(prevCourse => {
-            if (!prevCourse) return prevCourse;
-
-            const updatedModules = prevCourse.modules.map((mod, modIdx) => {
-              if (modIdx !== MODULE_INDEX) return mod;
-
-              const updatedSlides = mod.slides.map((slide, sIdx) => {
-                if (sIdx !== slideIdx) return slide;
-
-                const updatedBlocks = slide.blocks.map((block, bIdx) => {
-                  if (bIdx !== blockIdx || block.type !== 'image') return block;
-                  return { ...block, imageUrl };
-                });
-
-                return { ...slide, blocks: updatedBlocks };
-              });
-
-              return { ...mod, slides: updatedSlides };
-            });
-
-            const updated = { ...prevCourse, modules: updatedModules };
-
-            // Save updated course to history to persist image URLs
-            const savedHistory = localStorage.getItem('omni_history');
-            const existingHistory = savedHistory ? JSON.parse(savedHistory) : [];
-            const newHistory = [updated, ...existingHistory.filter((h: Course) => h.id !== updated.id)].slice(0, 10);
-            localStorage.setItem('omni_history', JSON.stringify(newHistory));
-
-            return updated;
-          });
-        };
-
         const moduleContent = await generateModuleContent(
           currentCourse.title,
           module.title,
           module.description,
           module.slides.map(s => s.title),
           previousContext,
-          handleImageReady // Enable progressive loading for background modules too
+          undefined,  // No callback needed
+          true        // skipImageSelection - images loaded on-demand when user navigates
         );
 
         // Merge slides: use structure from moduleContent but preserve imageUrls from state
@@ -733,7 +885,9 @@ When you feel you have enough information, suggest creating a personalized curri
           module.title,
           module.description,
           module.slides.map(s => s.title),
-          previousContext
+          previousContext,
+          undefined,  // No callback needed
+          true        // skipImageSelection - images loaded on-demand when user navigates
         );
 
         const updatedCourse: Course = {
@@ -786,12 +940,78 @@ When you feel you have enough information, suggest creating a personalized curri
 
     setActiveModuleIndex(newMod);
     setActiveSlideIndex(newSlide);
+
+    // Trigger on-demand image selection if we moved to a new module
+    if (newMod !== activeModuleIndex) {
+      triggerImageSelectionForModule(newMod);
+    }
+  };
+
+  /**
+   * Trigger on-demand image selection for a module.
+   * Called when user navigates to a module that hasn't had images selected yet.
+   */
+  const triggerImageSelectionForModule = async (moduleIndex: number) => {
+    if (!course) return;
+
+    // Check if already selected
+    if (imagesSelectedForModule[moduleIndex]) {
+      console.log(`📷 Module ${moduleIndex + 1} images already selected`);
+      return;
+    }
+
+    const module = course.modules[moduleIndex];
+    if (!module || !module.isLoaded) {
+      console.log(`📷 Module ${moduleIndex + 1} not loaded yet, skipping image selection`);
+      return;
+    }
+
+    console.log(`\n📷 Triggering on-demand image selection for Module ${moduleIndex + 1}: "${module.title}"`);
+
+    // Mark as in-progress immediately to prevent duplicate calls
+    setImagesSelectedForModule(prev => {
+      const updated = [...prev];
+      updated[moduleIndex] = true;
+      return updated;
+    });
+
+    // Create callback to update course state as images are selected
+    const handleImageReady = (slideIdx: number, blockIdx: number, imageUrl: string) => {
+      setCourse(prevCourse => {
+        if (!prevCourse) return prevCourse;
+
+        const updatedModules = prevCourse.modules.map((mod, modIdx) => {
+          if (modIdx !== moduleIndex) return mod;
+
+          const updatedSlides = mod.slides.map((slide, sIdx) => {
+            if (sIdx !== slideIdx) return slide;
+
+            const updatedBlocks = slide.blocks.map((block, bIdx) => {
+              if (bIdx !== blockIdx || block.type !== 'image') return block;
+              return { ...block, imageUrl };
+            });
+
+            return { ...slide, blocks: updatedBlocks };
+          });
+
+          return { ...mod, slides: updatedSlides };
+        });
+
+        return { ...prevCourse, modules: updatedModules };
+      });
+    };
+
+    // Trigger the image selection
+    await selectImagesForModule(module.slides as any, handleImageReady);
   };
 
   const jumpToSlide = async (modIdx: number, slideIdx: number) => {
     await loadModuleIfNeeded(modIdx);
     setActiveModuleIndex(modIdx);
     setActiveSlideIndex(slideIdx);
+
+    // Trigger on-demand image selection for this module
+    triggerImageSelectionForModule(modIdx);
   };
 
   const loadFromHistory = (item: Course) => {
@@ -831,7 +1051,7 @@ When you feel you have enough information, suggest creating a personalized curri
               </div>
               {showHistorySidebar && (
                 <div className="overflow-hidden">
-                  <h1 className="font-bold text-white text-lg">OmniLearn</h1>
+                  <h1 className="font-bold text-white text-lg">KnowMore</h1>
                   <p className="text-zinc-500 text-xs">AI Learning Platform</p>
                 </div>
               )}
@@ -898,7 +1118,7 @@ When you feel you have enough information, suggest creating a personalized curri
                 <div className="p-2 bg-gradient-to-br from-amber-400 to-orange-500 rounded-xl text-black">
                   <Icons.Brain />
                 </div>
-                <h1 className="font-bold text-white text-2xl">OmniLearn</h1>
+                <h1 className="font-bold text-white text-2xl">KnowMore</h1>
               </div>
             </div>
 
@@ -912,58 +1132,111 @@ When you feel you have enough information, suggest creating a personalized curri
               </p>
             </div>
 
-            {/* Input Section */}
-            <div className="space-y-6">
+            {/* Input Section - Larger 2-row prompt box */}
+            <div className="space-y-6 w-full max-w-2xl">
               <div className="relative group">
                 {/* Glow effect behind input */}
-                <div className="absolute -inset-2 bg-gradient-to-r from-amber-400/20 via-orange-500/20 to-amber-400/20 rounded-3xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
-                <input
-                  type="text"
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleInitialSubmit()}
-                  placeholder={isChatMode ? "Describe what you want to learn..." : "Enter a topic..."}
-                  className="relative w-full bg-zinc-900/90 border-2 border-zinc-700 text-white text-lg md:text-xl px-8 py-6 rounded-2xl shadow-2xl focus:outline-none focus:ring-4 focus:ring-amber-400/30 focus:border-amber-400 transition-all placeholder-zinc-500"
-                />
-                <button
-                  onClick={handleInitialSubmit}
-                  disabled={isLoading || !topic.trim()}
-                  className="absolute right-3 top-3 bottom-3 bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-500 hover:to-orange-600 text-zinc-950 rounded-xl px-8 flex items-center gap-2 transition-all disabled:opacity-50 font-bold text-lg shadow-lg"
-                >
-                  {isLoading ? (
-                    <span className="animate-spin h-5 w-5 border-2 border-black border-t-transparent rounded-full"></span>
-                  ) : (
-                    <>Start<Icons.ArrowRight /></>
-                  )}
-                </button>
+                <div className="absolute -inset-3 bg-gradient-to-r from-amber-400/20 via-orange-500/20 to-amber-400/20 rounded-3xl blur-xl opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                {/* Large prompt box */}
+                <div className="relative bg-zinc-900/95 border-2 border-zinc-700 rounded-2xl shadow-2xl focus-within:ring-4 focus-within:ring-amber-400/30 focus-within:border-amber-400 transition-all overflow-visible">
+                  {/* Top row: Input field with Send button */}
+                  <div className="flex items-center">
+                    <input
+                      type="text"
+                      value={topic}
+                      onChange={(e) => setTopic(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleInitialSubmit()}
+                      placeholder={isChatMode ? "Describe what you want to learn..." : "Enter a topic to learn about..."}
+                      className="flex-1 min-w-0 bg-transparent text-white text-xl px-6 py-6 focus:outline-none placeholder-zinc-500"
+                    />
+                    <div className="flex-shrink-0 pr-3">
+                      <button
+                        onClick={handleInitialSubmit}
+                        disabled={isLoading || !topic.trim()}
+                        className="bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-500 hover:to-orange-600 text-zinc-950 rounded-lg px-5 py-2.5 flex items-center gap-2 transition-all disabled:opacity-50 font-semibold text-sm shadow-lg whitespace-nowrap"
+                      >
+                        {isLoading ? (
+                          <span className="animate-spin h-5 w-5 border-2 border-black border-t-transparent rounded-full"></span>
+                        ) : (
+                          <>Start<Icons.ArrowRight /></>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  {/* Bottom row: Mode dropdown at left corner */}
+                  <div className="border-t border-zinc-800 px-3 py-2 flex items-center">
+                    <div className="relative">
+                      <button
+                        onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
+                        onBlur={() => setTimeout(() => setModeDropdownOpen(false), 150)}
+                        className="flex items-center gap-2 px-3 py-2 text-zinc-400 hover:text-amber-400 text-sm transition-colors rounded-lg hover:bg-zinc-800/50"
+                      >
+                        <span>{learningMode === 'curriculum' ? '📚' : learningMode === 'article' ? '📄' : '🎬'}</span>
+                        <span className="capitalize">{learningMode === 'presentation' ? 'Presentation' : learningMode}</span>
+                        <svg className={`w-3 h-3 transition-transform ${modeDropdownOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {modeDropdownOpen && (
+                        <div className="absolute bottom-full left-0 mb-2 w-48 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden z-50">
+                          {[
+                            { value: 'curriculum', label: 'Curriculum', emoji: '📚', desc: 'Structured modules' },
+                            { value: 'article', label: 'Article', emoji: '📄', desc: 'Single page read' },
+                            { value: 'presentation', label: 'Presentation', emoji: '🎬', desc: 'Visual slides' }
+                          ].map((option) => (
+                            <button
+                              key={option.value}
+                              onMouseDown={(e) => { e.preventDefault(); setLearningMode(option.value as LearningMode); setModeDropdownOpen(false); }}
+                              className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800 transition-colors ${
+                                learningMode === option.value ? 'bg-zinc-800 text-amber-400' : 'text-white'
+                              }`}
+                            >
+                              <span className="text-lg">{option.emoji}</span>
+                              <div>
+                                <div className="font-medium">{option.label}</div>
+                                <div className="text-xs text-zinc-500">{option.desc}</div>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Mode Toggle and Settings */}
-              <div className="flex justify-center items-center gap-4 text-sm">
-                <span className={`transition-colors ${!isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Quick Generate</span>
-                <button
-                  onClick={() => setIsChatMode(!isChatMode)}
-                  className={`w-14 h-7 rounded-full p-1 transition-colors ${isChatMode ? 'bg-amber-400' : 'bg-zinc-800'}`}
-                >
-                  <div className={`w-5 h-5 rounded-full bg-black transition-transform ${isChatMode ? 'translate-x-7' : 'translate-x-0'}`}></div>
-                </button>
-                <span className={`transition-colors ${isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Guided Chat</span>
-                {/* Settings button - only show in Quick Generate mode */}
-                {!isChatMode && (
+              <div className="flex flex-col items-center gap-4">
+                {/* Quick/Guided Toggle */}
+                <div className="flex items-center gap-4 text-sm">
+                  <span className={`transition-colors ${!isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Quick Generate</span>
                   <button
-                    onClick={() => setShowSettingsModal(true)}
-                    className="ml-2 p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
-                    title="Personalization Settings"
+                    onClick={() => setIsChatMode(!isChatMode)}
+                    className={`w-14 h-7 rounded-full p-1 transition-colors ${isChatMode ? 'bg-amber-400' : 'bg-zinc-800'}`}
                   >
-                    <Icons.Settings />
+                    <div className={`w-5 h-5 rounded-full bg-black transition-transform ${isChatMode ? 'translate-x-7' : 'translate-x-0'}`}></div>
                   </button>
-                )}
+                  <span className={`transition-colors ${isChatMode ? 'text-white font-medium' : 'text-zinc-500'}`}>Guided Chat</span>
+                  {/* Settings button - only show in Quick Generate mode */}
+                  {!isChatMode && (
+                    <button
+                      onClick={() => setShowSettingsModal(true)}
+                      className="ml-2 p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+                      title="Personalization Settings"
+                    >
+                      <Icons.Settings />
+                    </button>
+                  )}
+                </div>
               </div>
 
               <p className="text-zinc-600 text-sm">
-                {isChatMode
-                  ? "I'll ask a few questions to personalize your learning experience"
-                  : "Generate a curriculum instantly based on your topic"}
+                {learningMode === 'curriculum'
+                  ? (isChatMode ? "I'll ask a few questions to personalize your learning experience" : "Generate a curriculum instantly based on your topic")
+                  : learningMode === 'article'
+                  ? "Generate a comprehensive article with sections and images"
+                  : "Create an interactive presentation with slides and voice"
+                }
               </p>
             </div>
 
@@ -1435,6 +1708,194 @@ When you feel you have enough information, suggest creating a personalized curri
                 <Icons.Sparkles />
               </div>
               <p className="text-white font-medium">{loadingText}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ============================================
+  // ARTICLE VIEW - Single scrollable article
+  // ============================================
+  if (view === 'ARTICLE' && article) {
+    return (
+      <div className="h-screen bg-zinc-950 flex overflow-hidden">
+        {/* Main Article Content */}
+        <div className="flex-1 overflow-y-auto">
+          {/* Header */}
+          <div className="sticky top-0 z-10 bg-zinc-950/95 backdrop-blur-sm border-b border-zinc-800 px-8 py-4">
+            <div className="max-w-4xl mx-auto flex items-center justify-between">
+              <button onClick={() => { setView('HOME'); setArticle(null); }} className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors">
+                <Icons.ArrowLeft /> Back
+              </button>
+              <button onClick={() => setShowChatPane(!showChatPane)} className={`p-2 rounded-lg transition-colors ${showChatPane ? 'bg-amber-400 text-black' : 'bg-zinc-800 text-zinc-400 hover:text-white'}`}>
+                <Icons.MessageCircle />
+              </button>
+            </div>
+          </div>
+
+          {/* Article Content */}
+          <article className="max-w-4xl mx-auto px-8 py-12">
+            <header className="mb-12 text-center">
+              <h1 className="text-4xl md:text-5xl font-bold text-white mb-4">{article.title}</h1>
+              <p className="text-xl text-zinc-400">{article.overview}</p>
+            </header>
+
+            {article.sections.map((section, idx) => (
+              <section key={section.id} className="mb-12">
+                <h2 className="text-2xl font-semibold text-amber-400 mb-4">{section.title}</h2>
+                {section.imageUrl && (
+                  <div className="mb-6 rounded-xl overflow-hidden max-w-md">
+                    <img src={section.imageUrl} alt={section.title} className="w-full max-h-[200px] object-cover" />
+                  </div>
+                )}
+                <div className="prose prose-invert prose-lg max-w-none">
+                  {section.content.split('\n\n').map((para, pIdx) => (
+                    <p key={pIdx} className="text-zinc-300 leading-relaxed mb-4">{para}</p>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </article>
+        </div>
+
+        {/* Chat Pane - same as learning view */}
+        {showChatPane && (
+          <div className="w-[380px] border-l border-zinc-800 bg-zinc-950 flex flex-col">
+            <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
+              <h3 className="font-semibold text-zinc-200 flex items-center gap-2"><Icons.MessageCircle /> AI Assistant</h3>
+              <button onClick={() => setShowChatPane(false)} className="text-zinc-500 hover:text-white"><Icons.X /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {chatMessages.length === 0 && (
+                <div className="text-center text-zinc-600 text-sm py-8">Ask me anything about this article!</div>
+              )}
+              {chatMessages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-2xl p-3 text-sm ${msg.role === 'user' ? 'bg-amber-400 text-black' : 'bg-zinc-900 text-zinc-300 border border-zinc-800'}`}>{msg.text}</div>
+                </div>
+              ))}
+            </div>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              if (!chatInput.trim() || isChatLoading) return;
+              setChatMessages(prev => [...prev, { role: 'user', text: chatInput, timestamp: Date.now() }]);
+              setChatInput('');
+              setIsChatLoading(true);
+              try {
+                const response = await generateChatResponse(chatMessages.map(m => ({ role: m.role, parts: [{ text: m.text }] })), `Article: ${article.title}. Question: ${chatInput}`);
+                setChatMessages(prev => [...prev, { role: 'model', text: response, timestamp: Date.now() }]);
+              } catch (e) { console.error(e); }
+              finally { setIsChatLoading(false); }
+            }} className="p-3 bg-zinc-950 border-t border-zinc-900">
+              <div className="flex gap-2">
+                <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Ask a question..." className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-amber-500" />
+                <button type="submit" disabled={isChatLoading} className="bg-amber-400 hover:bg-amber-500 text-black rounded-xl px-3 py-2 disabled:opacity-50"><Icons.ArrowRight /></button>
+              </div>
+            </form>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ============================================
+  // PRESENTATION VIEW - Slides with navigation
+  // ============================================
+  if (view === 'PRESENTATION' && presentation) {
+    const currentSlide = presentation.slides[activePresentationSlide];
+    const isFirst = activePresentationSlide === 0;
+    const isLast = activePresentationSlide === presentation.slides.length - 1;
+
+    return (
+      <div className="h-screen bg-zinc-950 flex overflow-hidden">
+        {/* Main Presentation Content */}
+        <div className="flex-1 flex flex-col">
+          {/* Header */}
+          <div className="flex-shrink-0 bg-zinc-950/95 border-b border-zinc-800 px-8 py-4">
+            <div className="flex items-center justify-between">
+              <button onClick={() => { setView('HOME'); setPresentation(null); }} className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors">
+                <Icons.ArrowLeft /> Back
+              </button>
+              <span className="text-zinc-500">{activePresentationSlide + 1} / {presentation.slides.length}</span>
+              <button onClick={() => setShowChatPane(!showChatPane)} className={`p-2 rounded-lg transition-colors ${showChatPane ? 'bg-amber-400 text-black' : 'bg-zinc-800 text-zinc-400 hover:text-white'}`}>
+                <Icons.MessageCircle />
+              </button>
+            </div>
+          </div>
+
+          {/* Slide Content */}
+          <div className="flex-1 flex items-center justify-center p-8 overflow-hidden">
+            <div className="max-w-5xl w-full bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-12 shadow-2xl">
+              <h2 className="text-3xl md:text-4xl font-bold text-white mb-8">{currentSlide.title}</h2>
+
+              <div className="flex gap-8">
+                {/* Points */}
+                <div className="flex-1">
+                  <ul className="space-y-4">
+                    {currentSlide.points.map((point, idx) => (
+                      <li key={idx} className="flex items-start gap-3 text-lg text-zinc-300">
+                        <span className="text-amber-400 mt-1">•</span>
+                        {point}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Images */}
+                {currentSlide.imageUrls && currentSlide.imageUrls.length > 0 && (
+                  <div className="w-1/3 space-y-3">
+                    {currentSlide.imageUrls.filter(url => url).slice(0, 2).map((url, idx) => (
+                      <img key={idx} src={url!} alt="" className="w-full rounded-xl object-cover shadow-lg" />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation */}
+          <div className="flex-shrink-0 flex justify-center items-center gap-4 py-6 bg-zinc-950 border-t border-zinc-800">
+            <button onClick={() => setActivePresentationSlide(Math.max(0, activePresentationSlide - 1))} disabled={isFirst} className="p-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white disabled:opacity-30"><Icons.ArrowLeft /></button>
+            <div className="flex gap-2">
+              {presentation.slides.map((_, idx) => (
+                <button key={idx} onClick={() => setActivePresentationSlide(idx)} className={`w-3 h-3 rounded-full transition-colors ${idx === activePresentationSlide ? 'bg-amber-400' : 'bg-zinc-700 hover:bg-zinc-600'}`} />
+              ))}
+            </div>
+            <button onClick={() => setActivePresentationSlide(Math.min(presentation.slides.length - 1, activePresentationSlide + 1))} disabled={isLast} className="p-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white disabled:opacity-30"><Icons.ArrowRight /></button>
+          </div>
+        </div>
+
+        {/* Chat Pane */}
+        {showChatPane && (
+          <div className="w-[380px] border-l border-zinc-800 bg-zinc-950 flex flex-col">
+            <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
+              <h3 className="font-semibold text-zinc-200 flex items-center gap-2">
+                <Icons.MessageCircle /> AI Presenter
+                {learningVoice.isActive && <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-green-600">🎤 Live</span>}
+              </h3>
+              <button onClick={() => setShowChatPane(false)} className="text-zinc-500 hover:text-white"><Icons.X /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {chatMessages.map((msg, idx) => (
+                <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-2xl p-3 text-sm ${msg.role === 'user' ? 'bg-amber-400 text-black' : 'bg-zinc-900 text-zinc-300 border border-zinc-800'}`}>{msg.text}</div>
+                </div>
+              ))}
+              {learningVoice.isActive && (learningVoice.currentUserText || learningVoice.currentModelText) && (
+                <div className="space-y-2">
+                  {learningVoice.currentUserText && <div className="flex justify-end"><div className="max-w-[85%] rounded-2xl p-3 text-sm bg-amber-400/50 text-black/70 italic">{learningVoice.currentUserText}...</div></div>}
+                  {learningVoice.currentModelText && <div className="flex justify-start"><div className="max-w-[85%] rounded-2xl p-3 text-sm bg-zinc-900/50 text-zinc-400 border border-zinc-800 italic">{learningVoice.currentModelText}...</div></div>}
+                </div>
+              )}
+            </div>
+            <div className="p-3 bg-zinc-950 border-t border-zinc-900">
+              <div className="flex gap-2">
+                <button type="button" onClick={() => learningVoice.isActive ? learningVoice.stop() : learningVoice.start()} className={`flex-1 rounded-xl py-3 font-medium transition-all ${learningVoice.isActive ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-purple-600 hover:bg-purple-700 text-white'}`}>
+                  {learningVoice.isActive ? '⏹ Stop Voice' : '🎤 Start Voice Presenter'}
+                </button>
+              </div>
             </div>
           </div>
         )}

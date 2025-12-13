@@ -14,6 +14,7 @@ import { CURATED_TOPICS, CuratedTopic } from '../data/curatedTopics';
 // ============================================
 
 interface CuratedTopicCardProps {
+  key?: string;
   topic: CuratedTopic;
   onClick: () => void;
 }
@@ -81,11 +82,10 @@ function CuratedTopicCard({ topic, onClick }: CuratedTopicCardProps) {
 
       {/* Content */}
       <div className="absolute bottom-0 left-0 right-0 p-4 text-left">
-        <span className="text-2xl mb-1 block">{topic.emoji}</span>
         <h4 className="text-white font-semibold text-sm group-hover:text-amber-400 transition-colors">
           {topic.title}
         </h4>
-        <p className="text-zinc-400 text-xs mt-1 line-clamp-2">{topic.description}</p>
+        <p className="text-zinc-400 text-xs mt-1 line-clamp-2">{topic.tagline}</p>
       </div>
     </button>
   );
